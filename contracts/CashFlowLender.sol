@@ -6,6 +6,7 @@ import {ERC2771ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/met
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {IERC721Receiver} from "@openzeppelin/contracts/interfaces/IERC721Receiver.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Packing} from "@openzeppelin/contracts/utils/Packing.sol";
 import {Address} from "@openzeppelin/contracts/utils/Address.sol";
@@ -23,8 +24,24 @@ import {AccessManagedProxy} from "./dependencies/AccessManagedProxy.sol";
 /**
  * @title CashFlow Lender Module that tracks ownership
  * @dev Implements the ERC-4626 standard tracking how much liquidity was provided by each LP.
- *      The assets managed by the vault are a mix of liquid USDC + the _debt tracked by the CFL. The _debt can be
- *      negative, in that case, the CFL owes to the customer.
+ *      The assets managed by the vault are a mix of liquid USDC + the $._totalDebt tracked by the CFL.
+ *
+ *      The debt is tracked as a global number, but also for each target and period (month for example). If the debt
+ *      is negative, it means Ensuro owes to the customer.
+ *
+ *      The funds can also be sent to a $._yieldVault to generate yields on the idle funds.
+ *
+ *      The contract forwards the calls to the targets (Ensuro risk modules), but it has two variants for doing that
+ *      a. forwardNewPolicy (and the batch variant): this method tracks the balance reduction caused by paying the
+ *         premiums, and in base of that number increases the debt.
+ *      b. forwardResolvePolicy (and the batch variant): this method just forwards the call (after doing access
+ *         validations). The debt will be reduced when the policies are resolved and the PolicyPool calls
+ *         `onPayoutReceived(...)`
+ *
+ *      The contract is a UUPSUpgradeable contract but MUST NOT be used with a plain ERC1967 proxy, but instead with
+ *      an `AccessManagedProxy` that executes the access control. The contract DOESN'T IMPLEMENT ACCESS CONTROL
+ *      validations on the critical methods. It's assumed it will be deployed behind an AccessManagedProxy with
+ *      the proper access control setup.
  *
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
@@ -40,6 +57,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   type TargetSlot is bytes32; // (target_address, slotSize, block.timestamp / slotSize) packed as bytes32
 
+  /**
+   * @dev This status defines what kind of operations are enabled for a given target
+   */
   enum TargetStatus {
     inactive, // Nothing accepted
     active, // Everything accepted
@@ -63,10 +83,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   }
 
   // keccak256(abi.encode(uint256(keccak256("ensuro.storage.CashFlowLender")) - 1)) & ~bytes32(uint256(0xff))
+  // solhint-disable-next-line const-name-snakecase
   bytes32 private constant CashFlowLenderStorageLocation =
     0x0dff660c705ec490383ffafc9e8e3ab4714559f9ec8567c5380d4ad2dff5af00;
 
   function _getCashFlowLenderStorage() private pure returns (CashFlowLenderStorage storage $) {
+    // solhint-disable-next-line no-inline-assembly
     assembly {
       $.slot := CashFlowLenderStorageLocation
     }
@@ -179,7 +201,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   }
 
   /**
-   * @dev Initializes the MultiTargetCFL
+   * @dev Initializes the CashFlowLender
+   *
+   * @param name_ Name of the accounting token (ERC20) for the LPs
+   * @param symbol_ Symbol of the accounting token (ERC20) for the LPs
+   * @param yieldVault_ An ERC-4626 vault where funds can be deployed to generate extra yields for the CFL LPs.
    */
   function initialize(string memory name_, string memory symbol_, IERC4626 yieldVault_) public virtual initializer {
     __CashFlowLender_init(name_, symbol_, yieldVault_);
@@ -216,12 +242,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     emit YieldVaultChanged(oldVault, yieldVault_);
   }
 
-  function _getTargetConfig(address target) internal returns (TargetConfig storage targetConfig) {
-    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-    targetConfig = $._targets[target];
-    require(targetConfig.status != TargetStatus.inactive, TargetNotFound(target));
-  }
-
+  /**
+   * @dev Changes the Yield Vault, deinvesting all the funds before doing it.
+   *
+   * @param yieldVault_ An ERC-4626 vault where funds can be deployed to generate extra yields for the CFL LPs.a
+   * @param force If true, it continues the operation even if some of the funds aren't withdrawable.
+   *
+   * Emits a {YieldVaultChanged} event
+   */
   function setYieldVault(IERC4626 yieldVault_, bool force) external {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     uint256 yieldAssets = $._yieldVault.convertToAssets($._yieldVault.balanceOf(address(this)));
@@ -229,6 +257,23 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     _setYieldVault(yieldVault_);
   }
 
+  function _getTargetConfig(address target) internal view returns (TargetConfig storage targetConfig) {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    targetConfig = $._targets[target];
+    require(targetConfig.status != TargetStatus.inactive, TargetNotFound(target));
+  }
+
+  /**
+   * @dev Adds a new target that can be used later to forward policies and track the debt.
+   *
+   * @param target Address of the target contract. It should be an Ensuro's RiskModule
+   * @param slotSize Duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
+   * @param debtLimit Limit of the debt in a given period for the target.
+   * @param minLiquidity Minimum liquidity tried to achieve before forwardNewPolicy. If cash (see `_balance()`) is
+   *                     lower than this amount, it will try to deinvest the funds to leave _balance() = minLiquidity
+   *
+   * Emits a {TargetAdded} event
+   */
   function addTarget(address target, uint32 slotSize, uint256 debtLimit, uint256 minLiquidity) external {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     TargetConfig storage targetConfig = $._targets[target];
@@ -243,6 +288,16 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     emit TargetAdded(target, targetConfig);
   }
 
+  /**
+   * @dev Changes debtLimit and minLiquidity for a given target.
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param debtLimit New limit of the debt in a given period for the target.
+   * @param minLiquidity Minimum liquidity tried to achieve before forwardNewPolicy. If cash (see `_balance()`) is
+   *                     lower than this amount, it will try to deinvest the funds to leave _balance() = minLiquidity
+   *
+   * Emits a {TargetLimitsChanged} event
+   */
   function changeTargetLimits(address target, uint256 debtLimit, uint256 minLiquidity) external {
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetLimitsChanged(target, targetConfig.debtLimit, debtLimit, targetConfig.minLiquidity, minLiquidity);
@@ -250,6 +305,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     targetConfig.minLiquidity = minLiquidity.toUint96();
   }
 
+  /**
+   * @dev Changes status of a given target. See {TargetStatus}.
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param newStatus The new status of the contract
+   *
+   * Emits a {TargetStatusChanged} event
+   */
   function changeTargetStatus(address target, TargetStatus newStatus) external {
     // Check the newStatus != inactive. If you want to disable a target, move it to suspended
     require(newStatus != TargetStatus.inactive, CannotDeactivateTarget());
@@ -258,6 +321,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     targetConfig.status = newStatus;
   }
 
+  /**
+   * @dev Changes the slotSize of a given target.
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param newSlotSize New duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
+   *
+   * Emits a {TargetStatusChanged} event
+   */
   function changeTargetSlotSize(address target, uint32 newSlotSize) external {
     require(newSlotSize != 0, InvalidSlotSize());
     TargetConfig storage targetConfig = _getTargetConfig(target);
@@ -265,9 +336,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     targetConfig.slotSize = newSlotSize;
   }
 
-  /**
-   * @dev See {IERC165-supportsInterface}.
-   */
+  /// @inheritdoc ERC165
   function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
     return
       interfaceId == type(IPolicyHolder).interfaceId ||
@@ -278,6 +347,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address newImpl) internal view override {}
 
+  /// @inheritdoc IERC721Receiver
   function onERC721Received(
     address,
     address,
@@ -287,17 +357,18 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return IERC721Receiver.onERC721Received.selector;
   }
 
+  /// @inheritdoc IPolicyHolder
   function onPolicyExpired(address, address, uint256) external view override onlyPolicyPool returns (bytes4) {
     return IPolicyHolder.onPolicyExpired.selector;
   }
 
+  /// @inheritdoc IPolicyHolder
   function onPayoutReceived(
     address operator,
     address,
     uint256,
     uint256 amount
   ) external override onlyPolicyPool returns (bytes4) {
-    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     // In the PolicyPool the `operator` == _msgSender() for the payout call is the Risk Module, so, it's the same
     // target we called on newPolicy.
     TargetConfig storage targetConfig = _getTargetConfig(operator);
@@ -314,11 +385,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return IPolicyHolder.onPayoutReceived.selector;
   }
 
-  function onPolicyReplaced(address, address, uint256, uint256) external override onlyPolicyPool returns (bytes4) {
+  /// @inheritdoc IPolicyHolderV2
+  function onPolicyReplaced(address, address, uint256, uint256) external view override onlyPolicyPool returns (bytes4) {
     return IPolicyHolderV2.onPolicyReplaced.selector;
   }
 
   // Fix Context base contract duplicates
+
+  /// @inheritdoc ERC2771ContextUpgradeable
   function _contextSuffixLength()
     internal
     view
@@ -328,10 +402,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return ERC2771ContextUpgradeable._contextSuffixLength();
   }
 
+  /// @inheritdoc ERC2771ContextUpgradeable
   function _msgSender() internal view override(ContextUpgradeable, ERC2771ContextUpgradeable) returns (address) {
     return ERC2771ContextUpgradeable._msgSender();
   }
 
+  /// @inheritdoc ERC2771ContextUpgradeable
   function _msgData() internal view override(ContextUpgradeable, ERC2771ContextUpgradeable) returns (bytes calldata) {
     return ERC2771ContextUpgradeable._msgData();
   }
@@ -363,11 +439,18 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     emit DebtChanged(target, slotSize, slotIndex, int256(amount), currentDebt_, $._totalDebt);
   }
 
+  /**
+   * @dev Computes a fake selector used to enable or disable in the AccessManager linked to the contract to enable
+   *      a given call (selector) to a given target
+   *
+   * @param target Address of the target contract.
+   * @param selector The 4-bytes method selector of the method to be called in the target
+   */
   function makeFakeSelector(address target, bytes4 selector) public pure returns (bytes4) {
     return Packing.extract_32_4(keccak256(abi.encodePacked(target, selector)), 0);
   }
 
-  function _checkCanForward(address caller, address target, bytes4 selector) internal {
+  function _checkCanForward(address caller, address target, bytes4 selector) internal view {
     bytes4 fakeSelector = makeFakeSelector(target, selector);
     (bool immediate, ) = AccessManagedProxy(payable(address(this))).ACCESS_MANAGER().canCall(
       caller,
@@ -377,6 +460,21 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     require(immediate, UnauthorizedForward(caller, target, selector));
   }
 
+  /**
+   * @dev Forwards a call to the target contract, previously checking the target is active and tracking the increased
+   *      debt (in the current time slot).
+   *
+   *      When the `_balance()` is lower than `targetConfig.minLiquidity` it deinvests, but it doesn't fail if can't
+   *      deinvest all the required funds. If the required premiums are higher than the available balance, then it
+   *      will fail anyway.
+   *
+   *      If after the operation the debt is higher than targetConfig.debtLimit, it reverts.
+   *
+   *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param data The call to execute on the target contract
+   */
   function forwardNewPolicy(
     address target,
     bytes calldata data
@@ -385,6 +483,21 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     result = target.functionCall(data);
   }
 
+  /**
+   * @dev Forwards a call to the target contract, previously checking the target is active and tracking the increased
+   *      debt (in the current time slot). Batch version (multiple calls at once).
+   *
+   *      When the `_balance()` is lower than `targetConfig.minLiquidity` it deinvests, but it doesn't fail if can't
+   *      deinvest all the required funds. If the required premiums are higher than the available balance, then it
+   *      will fail anyway.
+   *
+   *      If after the operation the debt is higher than targetConfig.debtLimit, it reverts.
+   *
+   *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param data[] The calls to execute on the target contract
+   */
   function forwardNewPolicyBatch(
     address target,
     bytes[] calldata data
@@ -401,6 +514,16 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
+  /**
+   * @dev Forwards a call to the target contract, previously checking the target is active (or deprecated). It doesn't
+   *      track the debt change explicitly, but this should change when policies are resolved and onPayoutReceived
+   *      is called.
+   *
+   *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param data The calls to execute on the target contract
+   */
   function forwardResolvePolicy(
     address target,
     bytes calldata data
@@ -409,6 +532,16 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     result = target.functionCall(data);
   }
 
+  /**
+   * @dev Forwards a call to the target contract, previously checking the target is active (or deprecated). It doesn't
+   *      track the debt change explicitly, but this should change when policies are resolved and onPayoutReceived
+   *      is called. Batch version (multiple calls at once).
+   *
+   *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param data[] The calls to execute on the target contract
+   */
   function forwardResolvePolicyBatch(
     address target,
     bytes[] calldata data
@@ -425,6 +558,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
+  /// @inheritdoc ERC4626Upgradeable
   function totalAssets() public view override returns (uint256 assets) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     assets = _balance();
