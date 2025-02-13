@@ -6,6 +6,7 @@ import {ERC2771ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/met
 import {ContextUpgradeable} from "@openzeppelin/contracts-upgradeable/utils/ContextUpgradeable.sol";
 import {IERC20Metadata} from "@openzeppelin/contracts/interfaces/IERC20Metadata.sol";
 import {IERC20} from "@openzeppelin/contracts/interfaces/IERC20.sol";
+import {IERC721} from "@openzeppelin/contracts/interfaces/IERC721.sol";
 import {IERC721Receiver} from "@openzeppelin/contracts/interfaces/IERC721Receiver.sol";
 import {IERC4626} from "@openzeppelin/contracts/interfaces/IERC4626.sol";
 import {Packing} from "@openzeppelin/contracts/utils/Packing.sol";
@@ -51,6 +52,17 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   using SafeCast for uint256;
   using SafeCast for int256;
   using Address for address;
+
+  bytes4 public constant OWN_POLICY_SELECTOR = 0xdeadbeef;
+
+  /**
+   * @dev Slot size used to indicate the slots use calendar months.
+   *      Only years from 2025 to 2099 are supported
+   */
+  uint32 public constant SLOTSIZE_CALENDAR_MONTH = type(uint32).max;
+
+  uint256 private constant JAN_1ST_2025 = 1735689600;
+  uint256 private constant SECONDS_PER_DAY = 86400;
 
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IPolicyPool internal immutable _policyPool;
@@ -172,7 +184,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       int256 currDebt = _changeDebt(
         target,
         targetConfig.slotSize,
-        (block.timestamp / targetConfig.slotSize).toUint32(),
+        _makeSlotIndex(targetConfig.slotSize, block.timestamp),
         (balanceBefore - balanceAfter).toInt256()
       );
       require(currDebt <= int256(uint256(targetConfig.debtLimit)), DebtLimitExceeded(currDebt, targetConfig.debtLimit));
@@ -379,7 +391,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     _changeDebt(
       operator,
       targetConfig.slotSize,
-      (block.timestamp / targetConfig.slotSize).toUint32(),
+      _makeSlotIndex(targetConfig.slotSize, block.timestamp),
       -amount.toInt256()
     );
     return IPolicyHolder.onPayoutReceived.selector;
@@ -414,6 +426,54 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   function _balance() internal view returns (uint256) {
     return IERC20Metadata(asset()).balanceOf(address(this));
+  }
+
+  function _getMonth(uint256 dayInYear, bool isLeap) internal pure returns (uint256) {
+    if (dayInYear < 31) return 1;
+    if (isLeap) {
+      if (dayInYear < 60) return 2;
+      dayInYear--;
+    } else {
+      if (dayInYear < 59) return 2;
+    }
+    return
+      (dayInYear < 90)
+        ? 3
+        : (dayInYear < 120)
+          ? 4
+          : (dayInYear < 151)
+            ? 5
+            : (dayInYear < 181)
+              ? 6
+              : (dayInYear < 212)
+                ? 7
+                : (dayInYear < 243)
+                  ? 8
+                  : (dayInYear < 273)
+                    ? 9
+                    : (dayInYear < 304)
+                      ? 10
+                      : (dayInYear < 334)
+                        ? 11
+                        : 12;
+  }
+
+  function _computeCalendarMonth(uint256 timestamp) internal pure returns (uint32 slotIndex) {
+    bool isLeap;
+    slotIndex = 2025;
+    uint256 daysRemaining = (timestamp - JAN_1ST_2025) / SECONDS_PER_DAY;
+
+    // Iterate through years to find the correct year
+    while (daysRemaining >= (isLeap ? 366 : 365)) {
+      daysRemaining -= isLeap ? 366 : 365;
+      slotIndex++;
+      isLeap = slotIndex % 4 == 0;
+    }
+    return uint32(slotIndex * 100 + _getMonth(daysRemaining, isLeap));
+  }
+
+  function _makeSlotIndex(uint32 slotSize, uint256 timestamp) internal pure returns (uint32 slotIndex) {
+    return (slotSize == SLOTSIZE_CALENDAR_MONTH) ? _computeCalendarMonth(timestamp) : uint32(slotSize / timestamp);
   }
 
   function _makeTargetSlot(address target, uint32 slotSize, uint32 slotIndex) internal pure returns (TargetSlot slot) {
@@ -472,6 +532,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
    *
+   *      Requires the return value of the called function returns the policyId and checks if the resulting policy
+   *      (a PolicyPool NFT), is owned by the CFL.
+   *      If it's not, it requires the _msgSender() has permission to call address(this) on
+   *      `makeFakeSelector(target, OWN_POLICY_SELECTOR)`
+   *
    * @param target Address of the target contract. It must be one previously added with {addTarget}.
    * @param data The call to execute on the target contract
    */
@@ -481,6 +546,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   ) external forwardNewPolicyWrapper(target) returns (bytes memory result) {
     _checkCanForward(_msgSender(), target, bytes4(data[0:4]));
     result = target.functionCall(data);
+    uint256 policyId = abi.decode(result, (uint256));
+    if (IERC721(address(_policyPool)).ownerOf(policyId) != address(this)) {
+      // Check the caller is allowed to create policies not owned by the CFL
+      _checkCanForward(_msgSender(), target, OWN_POLICY_SELECTOR);
+    }
   }
 
   /**
@@ -495,6 +565,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    *      Requires the _msgSender() has permission to call address(this) on the fakeSelector (see {makeFakeSelector})
    *
+   *      Requires the return value of the called function returns the policyId and checks if the resulting policy
+   *      (a PolicyPool NFT), is owned by the CFL.
+   *      If it's not, it requires the _msgSender() has permission to call address(this) on
+   *      `makeFakeSelector(target, OWN_POLICY_SELECTOR)`
+   *
    * @param target Address of the target contract. It must be one previously added with {addTarget}.
    * @param data[] The calls to execute on the target contract
    */
@@ -503,6 +578,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     bytes[] calldata data
   ) external forwardNewPolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
+    bool ownOK = false;
     for (uint256 i; i < data.length; i++) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
@@ -511,6 +587,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
         lastSelector = selector;
       }
       result[i] = target.functionCall(data[i]);
+      if (!ownOK) {
+        uint256 policyId = abi.decode(result[i], (uint256));
+        if (IERC721(address(_policyPool)).ownerOf(policyId) != address(this)) {
+          // Check the caller is allowed to create policies not owned by the CFL
+          _checkCanForward(_msgSender(), target, OWN_POLICY_SELECTOR);
+          ownOK = true;
+        }
+      }
     }
   }
 
@@ -584,6 +668,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   ) internal virtual override {
     uint256 balance = _balance();
     if (balance < assets) {
+      // If not enough money liquid in the contract, deinvests from the vault
       CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
       require((assets - balance) < $._yieldVault.maxWithdraw(address(this)), NotEnoughCash());
       $._yieldVault.withdraw(assets - balance, address(this), address(this));
@@ -591,6 +676,13 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     super._withdraw(caller, receiver, owner, assets, shares);
   }
 
+  /**
+   * @dev Deinvest from the vault a given amount.
+   *
+   *      Requires $._yieldVault.maxWithdraw() <= amount
+   *
+   * @param amount Amount to withdraw from the `$._yieldVault`. If equal type(uint256).max, deinvests maxWithdraw()
+   */
   function withdrawFromYieldVault(uint256 amount) external {
     if (amount == type(uint256).max) {
       CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
@@ -599,6 +691,13 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     require(_deinvest(amount) == amount, NotEnoughCash());
   }
 
+  /**
+   * @dev Moves money that's liquid in the contract to the yield vault, to generate yields
+   *
+   *      Requires _balance() >= amount
+   *
+   * @param amount Amount to transfer to the `$._yieldVault`. If equal type(uint256).max, transfers `_balance()`
+   */
   function depositIntoYieldVault(uint256 amount) external {
     if (amount == type(uint256).max) {
       amount = _balance();
@@ -609,6 +708,21 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     $._yieldVault.deposit(amount, address(this));
   }
 
+  /**
+   * @dev Extracts money from the CFL that's owed to the customer, adjusting the debt (from negative to less negative)
+   *      in a given slot
+   *
+   *      Requires the debt of the slot <= -amount
+   *      Requires the CFL has enough money in cash (liquid + invested in the $._yieldVault)
+   *
+   *      emits {CashOutPayout}
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param slotSize Duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
+   * @param slotIndex Current slot time selected
+   * @param amount Amount to cash out
+   * @param destination Address that will receive the funds
+   */
   function cashOutPayouts(
     address target,
     uint32 slotSize,
@@ -630,6 +744,19 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     emit CashOutPayout(target, slotSize, slotIndex, amount, debtAfter, destination);
   }
 
+  /**
+   * @dev Repays debt to the CFL that's owed by the customer, adjusting the debt (from positive to less positive)
+   *      in a given slot
+   *
+   *      Requires the debt of the slot >= amount
+   *
+   *      emits {RepayDebt}
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param slotSize Duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
+   * @param slotIndex Current slot time selected
+   * @param amount Amount to pay
+   */
   function repayDebt(address target, uint32 slotSize, uint32 slotIndex, uint256 amount) external {
     _getTargetConfig(target);
 
