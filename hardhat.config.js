@@ -1,9 +1,13 @@
 require("@openzeppelin/hardhat-upgrades");
+require("hardhat-dependency-compiler");
 require("hardhat-contract-sizer");
 require("@nomicfoundation/hardhat-toolbox");
 const hretry = require("@ensuro/utils/js/hardhat-retry");
+const verifiableBinaries = require("@ensuro/utils/js/verifiableBinaries");
 
 hretry.installWrapper();
+verifiableBinaries.wrapEthersFunctions();
+verifiableBinaries.addTasks();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -21,5 +25,25 @@ module.exports = {
     alphaSort: true,
     runOnCompile: false,
     disambiguatePaths: false,
+  },
+  dependencyCompiler: {
+    paths: [
+      "@ensuro/utils/contracts/TestCurrency.sol",
+      "@ensuro/utils/contracts/TestERC4626.sol",
+      "@openzeppelin/contracts/access/manager/AccessManager.sol",
+    ],
+  },
+  verifiableBinaries: {
+    path: "./verifiable-binaries",
+    packages: [
+      {
+        package: "@ensuro/core",
+        version: "2.9.1",
+        type: "npm",
+        artifactsConfig: {
+          onlyFQ: "package",
+        },
+      },
+    ],
   },
 };
