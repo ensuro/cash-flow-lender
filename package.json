@@ -18,7 +18,7 @@
   },
   "dependencies": {
     "@ensuro/core": "^2.9.1",
-    "@ensuro/utils": "^0.2.2",
+    "@ensuro/utils": "^0.2.3",
     "@openzeppelin/contracts": "^5.2.0",
     "@openzeppelin/contracts-upgradeable": "^5.2.0",
     "hardhat-dependency-compiler": "^1.2.1"

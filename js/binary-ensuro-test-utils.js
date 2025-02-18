@@ -1,9 +1,136 @@
 const hre = require("hardhat");
 const { ethers } = hre;
-const { grantRole } = require("@ensuro/utils/js/utils");
+const { _W, grantRole } = require("@ensuro/utils/js/utils");
 const { deployProxy } = require("@ensuro/utils/js/test-utils");
+const { RiskModuleParameter } = require("@ensuro/core/js/enums");
 
-const randomAddress = "0x0000000071727de22e5e9d8baf0edac6f37da032";
+const { ZeroAddress } = ethers;
+
+async function createRiskModule(
+  pool,
+  premiumsAccount,
+  contractFactory,
+  {
+    rmName,
+    collRatio,
+    srRoc,
+    ensuroPPFee,
+    maxPayoutPerPolicy,
+    exposureLimit,
+    moc,
+    wallet,
+    extraArgs,
+    extraConstructorArgs,
+  }
+) {
+  extraArgs = extraArgs || [];
+  extraConstructorArgs = extraConstructorArgs || [];
+  const _A = pool._A || _W;
+  maxPayoutPerPolicy = maxPayoutPerPolicy !== undefined ? _A(maxPayoutPerPolicy) : _A(1000);
+  exposureLimit = exposureLimit !== undefined ? _A(exposureLimit) : _A(1000000);
+
+  const poolAddr = await ethers.resolveAddress(pool);
+  const paAddr = await ethers.resolveAddress(premiumsAccount);
+  const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
+  const rm = await deployProxy(
+    ERC1967Proxy,
+    contractFactory,
+    [poolAddr, paAddr, ...extraConstructorArgs],
+    [
+      rmName || "RiskModule",
+      _W(collRatio) || _W(1),
+      _W(ensuroPPFee) || _W(0),
+      _W(srRoc) || _W("0.1"),
+      maxPayoutPerPolicy,
+      exposureLimit,
+      wallet || "0xdD2FD4581271e230360230F9337D5c0430Bf44C0", // Random address
+      ...extraArgs,
+    ]
+  );
+
+  if (moc !== undefined && moc != 1.0) {
+    moc = _W(moc);
+    await rm.setParam(RiskModuleParameter.moc, moc);
+  }
+  return rm;
+}
+
+async function addRiskModule(
+  pool,
+  premiumsAccount,
+  contractFactory,
+  {
+    rmName,
+    collRatio,
+    srRoc,
+    ensuroPPFee,
+    maxPayoutPerPolicy,
+    exposureLimit,
+    moc,
+    wallet,
+    extraArgs,
+    extraConstructorArgs,
+  }
+) {
+  const rm = await createRiskModule(pool, premiumsAccount, contractFactory, {
+    rmName,
+    collRatio,
+    srRoc,
+    ensuroPPFee,
+    maxPayoutPerPolicy,
+    exposureLimit,
+    moc,
+    wallet,
+    extraArgs,
+    extraConstructorArgs,
+  });
+
+  await pool.addComponent(rm, 2);
+  return rm;
+}
+
+async function createEToken(
+  pool,
+  { etkName, etkSymbol, maxUtilizationRate, poolLoanInterestRate, extraArgs, extraConstructorArgs }
+) {
+  const EToken = await ethers.getContractFactory("@ensuro/core/EToken");
+  const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
+  extraArgs = extraArgs || [];
+  extraConstructorArgs = extraConstructorArgs || [];
+  const poolAddr = await ethers.resolveAddress(pool);
+  const etk = await deployProxy(
+    ERC1967Proxy,
+    EToken,
+    [poolAddr, ...extraConstructorArgs],
+    [
+      etkName === undefined ? "EToken" : etkName,
+      etkSymbol === undefined ? "eUSD1YEAR" : etkSymbol,
+      _W(maxUtilizationRate) || _W(1),
+      _W(poolLoanInterestRate) || _W("0.05"),
+      ...extraArgs,
+    ]
+  );
+
+  return etk;
+}
+
+async function addEToken(
+  pool,
+  { etkName, etkSymbol, maxUtilizationRate, poolLoanInterestRate, extraArgs, extraConstructorArgs }
+) {
+  const etk = await createEToken(pool, {
+    etkName,
+    etkSymbol,
+    maxUtilizationRate,
+    poolLoanInterestRate,
+    extraArgs,
+    extraConstructorArgs,
+  });
+  await pool.addComponent(etk, 1);
+  return etk;
+}
+
+const randomAddress = "0x89cDb70Fee571251a66E34caa1673cE40f7549Dc";
 
 /**
  * Deploys the PolicyPool contract and AccessManager
@@ -60,13 +187,25 @@ async function deployPool(options) {
   return policyPool;
 }
 
+async function deployPremiumsAccount(pool, options, addToPool = true) {
+  const PremiumsAccount = await ethers.getContractFactory("@ensuro/core/PremiumsAccount");
+  const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
+  const poolAddr = await ethers.resolveAddress(pool);
+  const jrEtkAddr = options.jrEtk ? await ethers.resolveAddress(options.jrEtk) : ZeroAddress;
+  const srEtkAddr = options.srEtk ? await ethers.resolveAddress(options.srEtk) : ZeroAddress;
+  const premiumsAccount = await deployProxy(ERC1967Proxy, PremiumsAccount, [poolAddr, jrEtkAddr, srEtkAddr], []);
+
+  if (addToPool) await pool.addComponent(premiumsAccount, 3);
+
+  return premiumsAccount;
+}
+
 module.exports = {
-  //  addEToken,
-  //  addRiskModule,
-  //  createEToken,
-  //  createRiskModule,
+  addEToken,
+  addRiskModule,
+  createEToken,
+  createRiskModule,
   deployPool,
   deployProxy,
-  //  deployPremiumsAccount,
-  //  makePolicy,
+  deployPremiumsAccount,
 };

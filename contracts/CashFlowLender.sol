@@ -149,7 +149,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error TargetAlreadyExists();
   error InvalidSlotSize();
   error DebtLimitExceeded(int256 currentDebt, uint96 debtLimit);
-  error UnauthorizedForward(address caller, address target, bytes4 selector);
+  error UnauthorizedForward(address caller, address target, bytes4 requiredSelector);
   error BalanceDecreasedOnResolve(uint256 balanceReduction);
   error YieldVaultIsRequired();
   error NotEnoughCash();
@@ -267,6 +267,14 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     uint256 yieldAssets = $._yieldVault.convertToAssets($._yieldVault.balanceOf(address(this)));
     require(_deinvest(yieldAssets) == yieldAssets || force, CannotDeinvestYieldVault());
     _setYieldVault(yieldVault_);
+  }
+
+  function yieldVault() external view returns (IERC4626) {
+    return _getCashFlowLenderStorage()._yieldVault;
+  }
+
+  function policyPool() external view returns (IPolicyPool) {
+    return _policyPool;
   }
 
   function _getTargetConfig(address target) internal view returns (TargetConfig storage targetConfig) {
@@ -517,7 +525,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       address(this),
       fakeSelector
     );
-    require(immediate, UnauthorizedForward(caller, target, selector));
+    require(immediate, UnauthorizedForward(caller, target, fakeSelector));
   }
 
   /**
