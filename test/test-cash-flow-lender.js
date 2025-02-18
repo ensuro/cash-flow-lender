@@ -299,5 +299,23 @@ variants.forEach((variant) => {
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
     });
+
+    /**
+     * Missing tests:
+     *
+     * 1. onXXX methods: check only policyPool can call them
+     * 2. Vault related methods: changing the yield vault, rebalance, etc.
+     * 3. Deposit and withdrawals and rebalance without debt
+     * 4. Batch methods
+     * 5. resolvePolicy methods.
+     * 6. Calls to replacePolicy (should use also the same forwardNewPolicy methods)
+     * 7. Calls to newPolicy with minLiquidity > 0 and 0 liquidity
+     * 8. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity
+     * 9. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity and (not) enough funds in the vault
+     * 10. repayDebt / cashOutPayouts
+     * 11. Target related methods
+     * 12. Calendar month calculation tests (can be made making _computeCalendarMonth visible and then disabling)
+     * 13. Current debt / totalAssets assertions
+     */
   });
 });
