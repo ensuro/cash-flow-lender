@@ -53,7 +53,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   using SafeCast for int256;
   using Address for address;
 
-  bytes4 public constant OWN_POLICY_SELECTOR = 0xdeadbeef;
+  bytes4 public constant OWN_POLICY_SELECTOR = 0xffffffff;
 
   /**
    * @dev Slot size used to indicate the slots use calendar months.
@@ -67,6 +67,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IPolicyPool internal immutable _policyPool;
 
+  /**
+   * @dev The target slot is the (address target, uint32 slotSize, uint32 slotIndex) packed in a bytes32
+   *      The slotIndex is defined as block.timestamp / slotSize for non calendar month slots or as year*100 + month
+   *      for calendar month slots.
+   *      For example, the slot for Jan 2026 is 2026001
+   */
   type TargetSlot is bytes32; // (target_address, slotSize, block.timestamp / slotSize) packed as bytes32
 
   /**
@@ -257,7 +263,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   /**
    * @dev Changes the Yield Vault, deinvesting all the funds before doing it.
    *
-   * @param yieldVault_ An ERC-4626 vault where funds can be deployed to generate extra yields for the CFL LPs.a
+   * @param yieldVault_ An ERC-4626 vault where funds can be deployed to generate extra yields for the CFL LPs.
    * @param force If true, it continues the operation even if some of the funds aren't withdrawable.
    *
    * Emits a {YieldVaultChanged} event
@@ -437,6 +443,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   }
 
   function _getMonth(uint256 dayInYear, bool isLeap) internal pure returns (uint256) {
+    // Method implemented as a table instead of a loop for gas savings.
+    // Saves around 300 gas per call.
     if (dayInYear < 31) return 1;
     if (isLeap) {
       if (dayInYear < 60) return 2;
@@ -475,7 +483,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     while (daysRemaining >= (isLeap ? 366 : 365)) {
       daysRemaining -= isLeap ? 366 : 365;
       slotIndex++;
-      isLeap = slotIndex % 4 == 0;
+      isLeap = slotIndex % 4 == 0 && (slotIndex % 100 != 0 || slotIndex % 400 == 0);
     }
     return uint32(slotIndex * 100 + _getMonth(daysRemaining, isLeap));
   }
@@ -721,7 +729,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *      in a given slot
    *
    *      Requires the debt of the slot <= -amount
-   *      Requires the CFL has enough money in cash (liquid + invested in the $._yieldVault)
+   *      Requires the CFL has enough funds (liquid + invested in the $._yieldVault)
    *
    *      emits {CashOutPayout}
    *
