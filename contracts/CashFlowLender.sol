@@ -53,7 +53,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   using SafeCast for int256;
   using Address for address;
 
-  bytes4 public constant OWN_POLICY_SELECTOR = 0xdeadbeef;
+  bytes4 public constant OWN_POLICY_SELECTOR = 0xffffffff;
 
   /**
    * @dev Slot size used to indicate the slots use calendar months.

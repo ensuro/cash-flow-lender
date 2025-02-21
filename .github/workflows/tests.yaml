@@ -26,3 +26,5 @@ jobs:
       - run: npx hardhat coverage
         env:
           ALCHEMY_URL: ${{ secrets.ALCHEMY_URL }}
+          # Initialize the provider early to avoid conflict between solcover and other plugins
+          SOLIDITY_COVERAGE: "true"
