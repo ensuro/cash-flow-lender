@@ -13,10 +13,12 @@ const {
 const { initCurrency } = require("@ensuro/utils/js/test-utils");
 const { DAY } = require("@ensuro/utils/js/constants");
 const { deployPool, deployPremiumsAccount, addRiskModule, addEToken } = require("../js/binary-ensuro-test-utils");
+const { packAccountGasLimits } = require("@ensuro/account-abstraction/js/userOp.js");
 
 const hre = require("hardhat");
 const helpers = require("@nomicfoundation/hardhat-network-helpers");
 const { deploy: ozUpgradesDeploy } = require("@openzeppelin/hardhat-upgrades/dist/utils");
+const { anyValue } = require("@nomicfoundation/hardhat-chai-matchers/withArgs");
 
 const { ethers } = hre;
 const { ZeroAddress, MaxUint256 } = ethers;
@@ -194,6 +196,158 @@ const variants = [
 
     callForwardMethod: async (ret, method, target, methodCall) =>
       ret.cfl.connect(ret.smartAccount)[method](target, methodCall),
+    expectCustomError: async (_, operation, contract, errorName, errorArgs) =>
+      expect(operation)
+        .to.be.revertedWithCustomError(contract, errorName)
+        .withArgs(...errorArgs),
+    usesAA: false,
+  },
+  {
+    name: "SmartAccountForwarder+Trustful",
+    tagit: tagit,
+    fixture: async () => {
+      const ret = await setUp();
+      const {
+        admin,
+        CashFlowLender,
+        yieldVault,
+        acMgr,
+        pool,
+        AccessManagedProxy,
+        premiumsAccount,
+        ensAccMgr,
+        lp,
+        lp2,
+        cflAdmin,
+        bridge23,
+      } = ret;
+
+      // Create and add the RiskModule
+      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
+      const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
+        ensuroFee: 0.03,
+      });
+
+      const EntryPoint = await ethers.getContractFactory("EntryPoint");
+      const ep = await EntryPoint.deploy();
+      const ERC2771ForwarderAccount = await ethers.getContractFactory("ERC2771ForwarderAccount");
+      const smartAccount = await ERC2771ForwarderAccount.deploy(ep, admin, [bridge23]);
+
+      await ep.depositTo(smartAccount, { value: _W(1) });
+
+      // Create and setup the CFL
+      const cfl = await hre.upgrades.deployProxy(
+        CashFlowLender,
+        [NAME, SYMB, await ethers.resolveAddress(yieldVault)],
+        {
+          kind: "uups",
+          unsafeAllow: [
+            "delegatecall",
+            "missing-initializer-call", // This is to fix an error because it says we are not calling
+            // parent initializer
+          ],
+          proxyFactory: AccessManagedProxy,
+          constructorArgs: [await ethers.resolveAddress(smartAccount), await ethers.resolveAddress(pool)],
+          deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
+        }
+      );
+      await makeAllViewsPublic(acMgr.connect(admin), cfl);
+
+      const ADMIN_ROLE = await setupAMSuperAdminRole(acMgr.connect(admin), cfl);
+      await acMgr.connect(admin).grantRole(ADMIN_ROLE, cflAdmin, 0);
+
+      const roles = {
+        LP_ROLE: 1,
+        SMART_ACCOUNT: 2, // Calls to forward... methods, used in operations
+        USER_OP_SIGNER: 3, // Permissions that will be granted to the userOp signer (_msgSender() when using 2771)
+      };
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "LP_ROLE", [
+        "withdraw",
+        "deposit",
+        "mint",
+        "redeem",
+        "transfer",
+      ]);
+      await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp, 0);
+      await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp2, 0);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "SMART_ACCOUNT", [
+        "forwardNewPolicy",
+        "forwardNewPolicyBatch",
+        "forwardResolvePolicy",
+        "forwardResolvePolicyBatch",
+      ]);
+      await acMgr.connect(admin).grantRole(roles.SMART_ACCOUNT, smartAccount, 0);
+
+      // Grant Permissions to the CFL
+      await ensAccMgr.grantComponentRole(rm, getRole("PRICER_ROLE"), cfl);
+      await ensAccMgr.grantComponentRole(rm, getRole("REPLACER_ROLE"), cfl);
+      await ensAccMgr.grantComponentRole(rm, getRole("RESOLVER_ROLE"), cfl);
+
+      return {
+        ADMIN_ROLE,
+        ep,
+        smartAccount,
+        cfl,
+        trustedForwarder: smartAccount,
+        rm,
+        roles,
+        ...ret,
+      };
+    },
+
+    createPolicyCall: async ({ rm, cfl }, policyParams, onBehalfOf = undefined) => {
+      // returns the call, selector, and premium amount
+      const premium = policyParams.premium || MaxUint256;
+      const payout = policyParams.payout || _A(100);
+      const lossProb = policyParams.lossProb || _W("0.05");
+      const expiration = policyParams.expiration || (await helpers.time.latest()) + 30 * DAY;
+      // eslint-disable-next-line no-plusplus
+      const internalId = policyParams.internalId || ++uniqueInternalId;
+      const chargedPremium =
+        premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium;
+      const newPolicyCall = rm.interface.encodeFunctionData("newPolicy", [
+        payout,
+        premium,
+        lossProb,
+        expiration,
+        getAddress(onBehalfOf || cfl),
+        internalId,
+      ]);
+      return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction("newPolicy").selector };
+    },
+
+    callForwardMethod: async (ret, method, target, methodCall) => {
+      const { cfl, smartAccount, bridge23, ep } = ret;
+      const forwardCall = cfl.interface.encodeFunctionData(method, [await ethers.resolveAddress(target), methodCall]);
+      const executeCall = smartAccount.interface.encodeFunctionData("execute", [
+        await ethers.resolveAddress(cfl),
+        0,
+        forwardCall,
+      ]);
+      const nonce = await ret.smartAccount.getNonce();
+      const userOp = [
+        await ethers.resolveAddress(ret.smartAccount),
+        nonce,
+        ethers.toUtf8Bytes(""),
+        executeCall,
+        packAccountGasLimits(999999, 999999),
+        999999,
+        packAccountGasLimits(1e9, 1e9),
+        ethers.toUtf8Bytes(""),
+      ];
+      const userOpHash = await ep.getUserOpHash([...userOp, ethers.toUtf8Bytes("")]);
+      const signature = await bridge23.signMessage(ethers.getBytes(userOpHash));
+      return ep.handleOps([[...userOp, signature]], bridge23);
+    },
+    usesAA: true,
+    expectCustomError: async (ret, operation, contract, errorName) => {
+      await expect(operation)
+        .to.emit(ret.ep, "UserOperationRevertReason")
+        .withArgs(anyValue, anyValue, anyValue, captureAny.value);
+      expect(captureAny.lastValue.startsWith(contract.interface.getError(errorName).selector)).to.equal(true);
+      // errorArgs not checked
+    },
   },
 ];
 
@@ -238,19 +392,27 @@ variants.forEach((variant) => {
       const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
 
       // Fails because of the missing permission
-      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-        .to.be.revertedWithCustomError(cfl, "UnauthorizedForward")
-        .withArgs(bridge23, rm, newPolicyFakeSelector);
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, newPolicyFakeSelector]
+      );
 
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
       await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-        .to.be.revertedWithCustomError(cfl, "ERC20InsufficientBalance")
-        .withArgs(cfl, 0, captureAny.uint);
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall),
+        cfl,
+        "ERC20InsufficientBalance",
+        [cfl, 0, captureAny.uint]
+      );
 
       // The amount that fails is the purePremium, not the chargedPremium - So I accept 10% difference
-      expect(captureAny.lastUint).to.closeTo(chargedPremium, _A(0.1) * chargedPremium);
+      if (!variant.usesAA) expect(captureAny.lastUint).to.closeTo(chargedPremium, _A(0.1) * chargedPremium);
 
       // Deposit some funds in the CFL
       await currency.connect(lp2).approve(cfl, _A(100));
@@ -284,9 +446,13 @@ variants.forEach((variant) => {
       await cfl.connect(lp2).deposit(_A(100), lp2);
 
       // Fails because of the missing permission
-      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-        .to.be.revertedWithCustomError(cfl, "UnauthorizedForward")
-        .withArgs(bridge23, rm, ownedPolicyFakeSelector);
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, ownedPolicyFakeSelector]
+      );
 
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [ownedPolicyFakeSelector]);
 
