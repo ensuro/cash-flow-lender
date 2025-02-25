@@ -300,7 +300,7 @@ variants.forEach((variant) => {
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
     });
 
-    variant.tagit("yieldVault without balance setYieldVault to new one", async function () {
+    variant.tagit("should be able to change the yield vault when there are no funds", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, TestERC4626, currency, cflAdmin, yieldVault } = ret;
 
@@ -315,22 +315,30 @@ variants.forEach((variant) => {
       expect(await cfl.yieldVault()).to.equal(newVault);
 
       expect(await currency.balanceOf(newVault)).to.equal(0);
+
+      expect(await currency.allowance(cfl, yieldVault)).to.equal(0); // Original vault allowance approvale reseted
+      expect(await currency.allowance(cfl, newVault)).to.equal(MaxUint256); // New vault allowance approvale setted to MaxUint256, _A(1000) this case
     });
 
-    variant.tagit("yieldVault with balance setYieldVault deinvest and set new one", async function () {
+    variant.tagit("should be able to change the yield vault when there funds in the yield vault", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
 
-      expect(await currency.balanceOf(yieldVault)).to.equal(0);
+      expect(await yieldVault.totalAssets()).to.equal(0);
+      expect(await cfl.totalAssets()).to.equal(0);
 
       await currency.connect(lp).approve(cfl, _A(1000));
       await cfl.connect(lp).deposit(_A(1000), lp);
 
-      expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
 
-      await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.not.be.reverted;
-      expect(await currency.balanceOf(yieldVault)).to.equal(_A(700));
-      expect(await currency.balanceOf(cfl)).to.equal(_A(300));
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(700), _A(700)]
+      );
+
+      expect(await yieldVault.totalAssets()).to.equal(_A(700));
 
       const newVault = await TestERC4626.deploy("New Yield Vault", "NEWYIELD", currency);
 
@@ -339,106 +347,159 @@ variants.forEach((variant) => {
         .withArgs(yieldVault, newVault);
       expect(await cfl.yieldVault()).to.equal(newVault);
 
-      expect(await currency.balanceOf(yieldVault)).to.equal(0); // Cheking the funds of the old vault were deinvested.
-      expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+      expect(await yieldVault.totalAssets()).to.equal(0); // Cheking the funds of the old vault were deinvested.
+      expect(await cfl.totalAssets()).to.equal(_A(1000)); // Funds are still in the CFL
 
-      expect(await currency.balanceOf(yieldVault)).to.equal(0); // New yield vaults balance in 0
+      expect(await newVault.totalAssets()).to.equal(0); // Balance not invested in the new vault after the deinvest & change
     });
 
     variant.tagit(
-      "Cfl partial deposits balance into yield vault & MaxUint256 deposit into yield vault",
+      "Should allow partial & MaxUint256 deposit into yield vault, and fail if there are not enough funds",
       async function () {
         const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
+        const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
 
-        expect(await currency.balanceOf(yieldVault)).to.equal(0);
-
-        await expect(cfl.connect(lp).deposit(_A(1000), lp)).to.be.revertedWithCustomError(
-          TestERC4626,
-          "ERC20InsufficientAllowance"
-        );
+        expect(await yieldVault.totalAssets()).to.equal(0);
+        expect(await cfl.totalAssets()).to.equal(0);
 
         await currency.connect(lp).approve(cfl, _A(1000));
         await cfl.connect(lp).deposit(_A(1000), lp);
 
-        expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+        expect(await cfl.totalAssets()).to.equal(_A(1000));
 
-        await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.not.be.reverted;
-        expect(await currency.balanceOf(yieldVault)).to.equal(_A(700));
-        expect(await currency.balanceOf(cfl)).to.equal(_A(300));
+        await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
+          currency,
+          [cfl, yieldVault],
+          [-_A(700), _A(700)]
+        );
+
+        expect(await yieldVault.totalAssets()).to.equal(_A(700));
 
         await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(400))).to.be.revertedWithCustomError(
           cfl,
           "NotEnoughCash"
         );
 
-        await expect(cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.not.be.reverted; // Should be the _A(300) left on CFL
-        expect(await currency.balanceOf(yieldVault)).to.equal(_A(1000));
-        expect(await currency.balanceOf(cfl)).to.equal(0);
+        await expect(
+          () => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256) // Should be the _A(300) left on CFL
+        ).to.changeTokenBalances(currency, [cfl, yieldVault], [-_A(300), _A(300)]);
+
+        expect(await yieldVault.totalAssets()).to.equal(_A(1000));
       }
     );
 
-    variant.tagit("Partial withdraw from yield vault & MaxUint256 withdraw from yield vault", async function () {
-      const ret = await helpers.loadFixture(variant.fixture);
-      const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
-
-      expect(await currency.balanceOf(yieldVault)).to.equal(0);
-
-      await currency.connect(lp).approve(cfl, _A(1000));
-      await cfl.connect(lp).deposit(_A(1000), lp);
-
-      expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
-
-      await expect(cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.not.be.reverted;
-      expect(await currency.balanceOf(yieldVault)).to.equal(_A(1000));
-
-      await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(_A(300))).to.not.be.reverted;
-      expect(await currency.balanceOf(yieldVault)).to.equal(_A(700));
-      expect(await currency.balanceOf(cfl)).to.equal(_A(300));
-
-      await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(_A(800))).to.be.revertedWithCustomError(
-        cfl,
-        "NotEnoughCash"
-      );
-
-      await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(MaxUint256)).to.not.be.reverted; // Should be the _A(700) left on Yield Vault
-      expect(await currency.balanceOf(yieldVault)).to.equal(0);
-      expect(await currency.balanceOf(cfl)).to.equal(_A(1000)); // The _A(300) + _A(700) left on the Yield Vault
-    });
-
     variant.tagit(
-      "Deposit into yield vault, set new yield vault deinvest assets and deposit in new yield vault",
+      "Should allow partial & MaxUint256 withdraws from yield vault, fails if there are not enough funds",
       async function () {
         const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
+        const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
 
-        expect(await currency.balanceOf(yieldVault)).to.equal(0);
+        expect(await yieldVault.totalAssets()).to.equal(0);
+        expect(await cfl.totalAssets()).to.equal(0);
 
         await currency.connect(lp).approve(cfl, _A(1000));
         await cfl.connect(lp).deposit(_A(1000), lp);
 
-        expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+        expect(await cfl.totalAssets()).to.equal(_A(1000));
 
-        await expect(cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.not.be.reverted;
-        expect(await currency.balanceOf(yieldVault)).to.equal(_A(1000));
+        await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
+          currency,
+          [cfl, yieldVault],
+          [-_A(1000), _A(1000)]
+        );
 
-        const newVault = await TestERC4626.deploy("New Yield Vault", "NEWYIELD", currency);
+        expect(await yieldVault.totalAssets()).to.equal(_A(1000));
 
-        await expect(cfl.connect(cflAdmin).setYieldVault(newVault, true))
-          .to.emit(cfl, "YieldVaultChanged")
-          .withArgs(yieldVault, newVault);
-        expect(await cfl.yieldVault()).to.equal(newVault);
+        await expect(() => cfl.connect(cflAdmin).withdrawFromYieldVault(_A(300))).to.changeTokenBalances(
+          currency,
+          [cfl, yieldVault],
+          [_A(300), -_A(300)]
+        );
+        expect(await yieldVault.totalAssets()).to.equal(_A(700));
 
-        expect(await currency.balanceOf(yieldVault)).to.equal(0);
-        expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+        await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(_A(800))).to.be.revertedWithCustomError(
+          cfl,
+          "NotEnoughCash"
+        );
 
-        await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.not.be.reverted;
-        expect(await currency.balanceOf(newVault)).to.equal(_A(700));
-        expect(await currency.balanceOf(cfl)).to.equal(_A(300));
+        await expect(
+          () => cfl.connect(cflAdmin).withdrawFromYieldVault(MaxUint256) // Should be the _A(700) left on Yield Vault
+        ).to.changeTokenBalances(currency, [cfl, yieldVault], [_A(700), -_A(700)]);
+        expect(await yieldVault.totalAssets()).to.equal(0);
       }
     );
 
-    variant.tagit("Restricts onXXX methods to onlyPolicyPool", async function () {
+    variant.tagit("Should deinvest assets from yield vault when changing to a new yield vault", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
+
+      expect(await yieldVault.totalAssets()).to.equal(0);
+      expect(await cfl.totalAssets()).to.equal(0);
+
+      await currency.connect(lp).approve(cfl, _A(1000));
+      await cfl.connect(lp).deposit(_A(1000), lp);
+
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
+
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(1000), _A(1000)]
+      );
+      expect(await yieldVault.totalAssets()).to.equal(_A(1000));
+
+      const newVault = await TestERC4626.deploy("New Yield Vault", "NEWYIELD", currency);
+
+      await expect(cfl.connect(cflAdmin).setYieldVault(newVault, true))
+        .to.emit(cfl, "YieldVaultChanged")
+        .withArgs(yieldVault, newVault);
+      expect(await cfl.yieldVault()).to.equal(newVault);
+
+      expect(await currency.allowance(cfl, yieldVault)).to.equal(0); // Original vault allowance approvale reseted
+      expect(await currency.allowance(cfl, newVault)).to.equal(MaxUint256); // New vault allowance approvale setted to MaxUint256, _A(1000) this case
+
+      expect(await yieldVault.totalAssets()).to.equal(0); // Deinvested frunds from yield vault
+      expect(await cfl.totalAssets()).to.equal(_A(1000)); // But funds are still in the CFL
+      expect(await newVault.totalAssets()).to.equal(0); // Balance not invested in the new vault after the deinvest & change
+
+      expect(await currency.allowance(cfl, yieldVault)).to.equal(0); // Original vault allowance approvale reseted
+      expect(await currency.allowance(cfl, newVault)).to.equal(MaxUint256); // New vault allowance approvale setted to MaxUint256, _A(1000) this case
+
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
+        currency,
+        [cfl, newVault],
+        [-_A(700), _A(700)]
+      );
+      expect(await newVault.totalAssets()).to.equal(_A(700));
+    });
+
+    variant.tagit("should withdraw from yield vault when cash is insufficient", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, yieldVault, lp, cflAdmin } = ret;
+
+      await currency.connect(lp).approve(cfl, _A(1000));
+      await cfl.connect(lp).deposit(_A(1000), lp);
+
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(800))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(800), _A(800)]
+      );
+
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
+      expect(await yieldVault.totalAssets()).to.equal(_A(800));
+
+      await expect(() => cfl.connect(lp).withdraw(_A(600), lp, lp)).to.changeTokenBalances(
+        currency,
+        [cfl, lp, yieldVault],
+        [-_A(200), _A(600), -_A(400)]
+      );
+
+      expect(await cfl.totalAssets()).to.equal(_A(400));
+      expect(await yieldVault.totalAssets()).to.equal(_A(400));
+    });
+
+    variant.tagit("Should restrict onXXX methods to be callable only by the PolicyPool", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin } = ret;
 
