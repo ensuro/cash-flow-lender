@@ -499,6 +499,76 @@ variants.forEach((variant) => {
       expect(await yieldVault.totalAssets()).to.equal(_A(400));
     });
 
+    variant.tagit("should fail to withdraw when CFL has not enough funds due to debt", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp, cflAdmin, rm, pool, bridge23, acMgr, roles, admin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      const { newPolicyCall, selector } = await variant.createPolicyCall(ret, {});
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await currency.connect(lp).approve(cfl, _A(1000));
+      await cfl.connect(lp).deposit(_A(1000), lp);
+
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value);
+
+      await expect(cfl.connect(lp).withdraw(_A(1000), lp, lp)).to.be.revertedWithCustomError(cfl, "NotEnoughCash");
+
+      const availableCash = await currency.balanceOf(cfl);
+
+      await expect(cfl.connect(lp).withdraw(availableCash, lp, lp)).to.not.be.reverted;
+    });
+
+    variant.tagit(
+      "Withdraw should deinvest from yield vault when cash is insufficient & fail when funds not enough due to debt",
+      async function () {
+        const ret = await helpers.loadFixture(variant.fixture);
+        const { cfl, currency, yieldVault, lp, cflAdmin, rm, pool, bridge23, acMgr, roles, admin } = ret;
+
+        await currency.connect(lp).approve(cfl, _A(1000));
+        await cfl.connect(lp).deposit(_A(1000), lp);
+
+        await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(800))).to.changeTokenBalances(
+          currency,
+          [cfl, yieldVault],
+          [-_A(800), _A(800)]
+        );
+
+        expect(await cfl.totalAssets()).to.equal(_A(1000));
+        expect(await yieldVault.totalAssets()).to.equal(_A(800));
+
+        await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+        // Use this premium to have a debt of _A(200) and test withdraws funds values not to be close to the actual total assets
+        const { newPolicyCall, selector } = await variant.createPolicyCall(ret, { premium: _A(200), payout: _A(1000) });
+        const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+
+        await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+        await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+        await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+          .to.emit(pool, "NewPolicy")
+          .withArgs(rm, captureAny.value);
+
+        await cfl.connect(lp).withdraw(_A(600), lp, lp);
+
+        expect(await yieldVault.totalAssets()).to.be.closeTo(_A(200), _A(10));
+
+        await expect(cfl.connect(lp).withdraw(_A(300), lp, lp)).to.be.revertedWithCustomError(cfl, "NotEnoughCash");
+
+        await expect(cfl.connect(lp).withdraw(_A(100), lp, lp)).not.to.be.reverted;
+
+        expect(await yieldVault.totalAssets()).to.be.closeTo(_A(100), _A(10));
+        expect(await cfl.totalAssets()).to.be.closeTo(_A(300), _A(10));
+      }
+    );
+
     variant.tagit("Should restrict onXXX methods to be callable only by the PolicyPool", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin } = ret;
