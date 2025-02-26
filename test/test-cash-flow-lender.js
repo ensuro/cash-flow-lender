@@ -684,7 +684,10 @@ variants.forEach((variant) => {
         .to.emit(pool, "NewPolicy")
         .withArgs(rm, captureAny.value);
 
-      await expect(cfl.connect(lp).withdraw(_A(1000), lp, lp)).to.be.revertedWithCustomError(cfl, "NotEnoughCash");
+      await expect(cfl.connect(lp).withdraw(_A(1000), lp, lp)).to.be.revertedWithCustomError(
+        cfl,
+        "ERC4626ExceededMaxWithdraw"
+      );
 
       const availableCash = await currency.balanceOf(cfl);
 
@@ -726,7 +729,10 @@ variants.forEach((variant) => {
 
         expect(await yieldVault.totalAssets()).to.be.closeTo(_A(200), _A(10));
 
-        await expect(cfl.connect(lp).withdraw(_A(300), lp, lp)).to.be.revertedWithCustomError(cfl, "NotEnoughCash");
+        await expect(cfl.connect(lp).withdraw(_A(300), lp, lp)).to.be.revertedWithCustomError(
+          cfl,
+          "ERC4626ExceededMaxWithdraw"
+        );
 
         await expect(cfl.connect(lp).withdraw(_A(100), lp, lp)).not.to.be.reverted;
 
