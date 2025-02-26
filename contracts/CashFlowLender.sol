@@ -658,6 +658,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
+  function currentDebt() external view returns (int256) {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    return int256($._totalDebt);
+  }
+
   /// @inheritdoc ERC4626Upgradeable
   function totalAssets() public view override returns (uint256 assets) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
@@ -670,9 +675,19 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
-  function currentDebt() external view returns (int256) {
+  function _cashWithdrawable() internal view returns (uint256) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-    return int256($._totalDebt);
+    return _balance() + $._yieldVault.maxWithdraw(address(this));
+  }
+
+  /// @inheritdoc ERC4626Upgradeable
+  function maxRedeem(address owner) public view virtual override returns (uint256) {
+    return Math.min(super.maxRedeem(owner), convertToShares(_cashWithdrawable()));
+  }
+
+  /// @inheritdoc ERC4626Upgradeable
+  function maxWithdraw(address owner) public view virtual override returns (uint256) {
+    return Math.min(super.maxWithdraw(owner), _cashWithdrawable());
   }
 
   function _withdraw(
