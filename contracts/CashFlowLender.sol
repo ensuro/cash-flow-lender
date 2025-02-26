@@ -701,7 +701,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     if (balance < assets) {
       // If not enough money liquid in the contract, deinvests from the vault
       CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-      require((assets - balance) < $._yieldVault.maxWithdraw(address(this)), NotEnoughCash());
+      require((assets - balance) <= $._yieldVault.maxWithdraw(address(this)), NotEnoughCash());
       $._yieldVault.withdraw(assets - balance, address(this), address(this));
     }
     super._withdraw(caller, receiver, owner, assets, shares);
