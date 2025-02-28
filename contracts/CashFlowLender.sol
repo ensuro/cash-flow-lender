@@ -595,6 +595,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   ) external forwardNewPolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
     bool ownOK = false;
+    result = new bytes[](data.length);
     for (uint256 i; i < data.length; i++) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
