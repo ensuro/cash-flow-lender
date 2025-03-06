@@ -209,7 +209,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     _;
     uint256 balanceAfter = _balance();
 
-    require(balanceAfter >= balanceBefore, BalanceDecreasedOnResolve(balanceBefore - balanceAfter));
+    if (balanceAfter < balanceBefore) {
+      revert BalanceDecreasedOnResolve(balanceBefore - balanceAfter);
+    }
   }
 
   /// @custom:oz-upgrades-unsafe-allow constructor
@@ -648,6 +650,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     bytes[] calldata data
   ) external forwardResolvePolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
+    result = new bytes[](data.length);
     for (uint256 i; i < data.length; i++) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
