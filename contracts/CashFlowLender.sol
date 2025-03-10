@@ -71,7 +71,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @dev The target slot is the (address target, uint32 slotSize, uint32 slotIndex) packed in a bytes32
    *      The slotIndex is defined as block.timestamp / slotSize for non calendar month slots or as year*100 + month
    *      for calendar month slots.
-   *      For example, the slot for Jan 2026 is 2026001
+   *      For example, the slot for Jan 2026 is 202601
    */
   type TargetSlot is bytes32; // (target_address, slotSize, block.timestamp / slotSize) packed as bytes32
 
