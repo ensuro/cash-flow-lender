@@ -484,7 +484,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     // Iterate through years to find the correct year
     while (daysRemaining >= (isLeap ? 366 : 365)) {
       daysRemaining -= isLeap ? 366 : 365;
-      slotIndex++;
+      ++slotIndex;
       isLeap = slotIndex % 4 == 0 && (slotIndex % 100 != 0 || slotIndex % 400 == 0);
     }
     return uint32(slotIndex * 100 + _getMonth(daysRemaining, isLeap));
@@ -598,7 +598,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     bytes4 lastSelector;
     bool ownOK = false;
     result = new bytes[](data.length);
-    for (uint256 i; i < data.length; i++) {
+    for (uint256 i; i < data.length; ++i) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
@@ -651,7 +651,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   ) external forwardResolvePolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
     result = new bytes[](data.length);
-    for (uint256 i; i < data.length; i++) {
+    for (uint256 i; i < data.length; ++i) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
