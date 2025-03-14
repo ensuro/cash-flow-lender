@@ -71,7 +71,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @dev The target slot is the (address target, uint32 slotSize, uint32 slotIndex) packed in a bytes32
    *      The slotIndex is defined as block.timestamp / slotSize for non calendar month slots or as year*100 + month
    *      for calendar month slots.
-   *      For example, the slot for Jan 2026 is 2026001
+   *      For example, the slot for Jan 2026 is 202601
    */
   type TargetSlot is bytes32; // (target_address, slotSize, block.timestamp / slotSize) packed as bytes32
 
@@ -209,7 +209,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     _;
     uint256 balanceAfter = _balance();
 
-    require(balanceAfter >= balanceBefore, BalanceDecreasedOnResolve(balanceBefore - balanceAfter));
+    if (balanceAfter < balanceBefore) {
+      revert BalanceDecreasedOnResolve(balanceBefore - balanceAfter);
+    }
   }
 
   /// @custom:oz-upgrades-unsafe-allow constructor
@@ -482,7 +484,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     // Iterate through years to find the correct year
     while (daysRemaining >= (isLeap ? 366 : 365)) {
       daysRemaining -= isLeap ? 366 : 365;
-      slotIndex++;
+      ++slotIndex;
       isLeap = slotIndex % 4 == 0 && (slotIndex % 100 != 0 || slotIndex % 400 == 0);
     }
     return uint32(slotIndex * 100 + _getMonth(daysRemaining, isLeap));
@@ -595,7 +597,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   ) external forwardNewPolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
     bool ownOK = false;
-    for (uint256 i; i < data.length; i++) {
+    result = new bytes[](data.length);
+    for (uint256 i; i < data.length; ++i) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
@@ -647,7 +650,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     bytes[] calldata data
   ) external forwardResolvePolicyWrapper(target) returns (bytes[] memory result) {
     bytes4 lastSelector;
-    for (uint256 i; i < data.length; i++) {
+    result = new bytes[](data.length);
+    for (uint256 i; i < data.length; ++i) {
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
