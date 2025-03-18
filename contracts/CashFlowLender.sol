@@ -349,6 +349,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     targetConfig.status = newStatus;
   }
 
+  function getTargetStatus(address target) external view returns (TargetStatus) {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    return $._targets[target].status;
+  }
+
   /**
    * @dev Changes the slotSize of a given target.
    *
