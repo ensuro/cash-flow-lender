@@ -44,13 +44,15 @@ describe("CashFlowLender pure functions tests", function () {
     }
   });
 
-  it("Computes the right calendar month for 1000 random values from Jan 1st 2025", async () => {
+  it("Computes the right calendar month for lot of random values from Jan 1st 2025", async () => {
     const { cfl } = await helpers.loadFixture(setUp);
     const jan1st2025 = 1735689600;
     let testDate = jan1st2025;
     const SLOTSIZE_CALENDAR_MONTH = await cfl.SLOTSIZE_CALENDAR_MONTH();
+    // Less testCases when SOLIDITY_COVERAGE
+    const testCount = process.env.SOLIDITY_COVERAGE !== undefined ? 200 : 1000;
 
-    for (let i = 0; i < 1000; i++) {
+    for (let i = 0; i < testCount; i++) {
       const testDateAsDate = new Date(testDate * 1000);
       const expected = testDateAsDate.getUTCFullYear() * 100 + testDateAsDate.getUTCMonth() + 1;
       expect(await cfl.$_computeCalendarMonth(testDate)).to.equal(expected);
