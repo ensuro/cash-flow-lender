@@ -31,6 +31,13 @@ const INITIAL = 10000;
 const NAME = "Cash Flow Lender";
 const SYMB = "CFL";
 
+const TargetStatus = {
+  inactive: 0,
+  active: 1,
+  deprecated: 2,
+  suspended: 3,
+};
+
 const roles = {
   LP_ROLE: 1,
   SMART_ACCOUNT: 2, // Calls to forward... methods, used in operations
@@ -115,6 +122,7 @@ async function setupCFLRoles({ acMgr, admin, cfl, cflAdmin, lp, lp2, smartAccoun
   await acMgr.connect(admin).grantRole(roles.SMART_ACCOUNT, smartAccount, 0);
 
   await setupAMRole(acMgr.connect(admin), cfl, roles, "POOL", [
+    "onERC721Received",
     "onPayoutReceived",
     "onPolicyExpired",
     "onPolicyReplaced",
@@ -439,11 +447,20 @@ variants.forEach((variant) => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
-      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
-
       const { newPolicyCall, chargedPremium, selector } = await variant.createPolicyCall(ret, {});
 
       const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+
+      // Fails because target not yet added
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall),
+        cfl,
+        "TargetNotFound",
+        [rm]
+      );
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       // Fails because of the missing permission
       await variant.expectCustomError(
@@ -802,6 +819,10 @@ variants.forEach((variant) => {
 
       // Grant the permission, otherwise it won't be able to pass the proxy
       await acMgr.connect(admin).grantRole(roles.POOL, cflAdmin, 0);
+
+      await expect(
+        cfl.connect(cflAdmin).onERC721Received(rm, ZeroAddress, 1, ethers.toUtf8Bytes(""))
+      ).to.be.revertedWithCustomError(cfl, "OnlyPolicyPool");
 
       await expect(cfl.connect(cflAdmin).onPolicyExpired(rm, ZeroAddress, 1)).to.be.revertedWithCustomError(
         cfl,
@@ -1207,6 +1228,66 @@ variants.forEach((variant) => {
       await expect(resolutionTx).to.changeTokenBalance(currency, anon, _A(100));
     });
 
+    variant.tagit(
+      "Can't create new policies on deprecated targets, but it can resolve (unless suspended)",
+      async () => {
+        const ret = await helpers.loadFixture(variant.fixture);
+        const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+
+        await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+        await vaultDeposit(cfl, lp2, _A(100), currency);
+
+        const [newPolicy1, newPolicy2] = await (await forwardPolicies(variant, ret, 2)).getPolicies();
+
+        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.inactive)).to.be.revertedWithCustomError(
+          cfl,
+          "CannotDeactivateTarget"
+        );
+        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.deprecated))
+          .to.emit(cfl, "TargetStatusChanged")
+          .withArgs(rm, TargetStatus.active, TargetStatus.deprecated);
+
+        expect(await cfl.getTargetStatus(rm)).to.equal(TargetStatus.deprecated);
+
+        const { callPromise } = await forwardPolicies(variant, ret, 1);
+        await variant.expectCustomError(ret, callPromise, cfl, "TargetNotActive", [rm, TargetStatus.deprecated]);
+
+        // Grant resolve fakeSelector
+        const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+        const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+        await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+        await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+        // Resolve the first policy
+        const payout = _A(100);
+        let resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy1, payout]);
+
+        await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+          .to.emit(pool, "PolicyResolved")
+          .withArgs(rm, newPolicy1.id, payout)
+          .to.emit(cfl, "DebtChanged");
+
+        // Now suspend the target
+        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.suspended))
+          .to.emit(cfl, "TargetStatusChanged")
+          .withArgs(rm, TargetStatus.deprecated, TargetStatus.suspended);
+
+        resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy2, payout]);
+
+        // resolve fails when suspended
+        await variant.expectCustomError(
+          ret,
+          variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall),
+          cfl,
+          "TargetNotActive",
+          [rm, TargetStatus.suspended]
+        );
+
+        const finalDebt = await cfl.currentDebt();
+        expect(finalDebt).to.be.equal(newPolicy1.premium + newPolicy2.premium - payout);
+      }
+    );
+
     variant.tagit("Can repay debt of previous slot", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo } = ret;
@@ -1309,6 +1390,21 @@ variants.forEach((variant) => {
         .withArgs(rm, slotSize, pastSlotIndex, _A(10), 0, bo);
       const finalDebt = await cfl.currentDebt();
       expect(finalDebt).to.equal(0);
+    });
+
+    variant.tagit("Can't add a target twice", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, rm, cflAdmin } = ret;
+
+      await expect(cfl.connect(cflAdmin).addTarget(rm, 0, _A(1000), _A(0))).to.be.revertedWithCustomError(
+        cfl,
+        "InvalidSlotSize"
+      );
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      await expect(cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0))).to.be.revertedWithCustomError(
+        cfl,
+        "TargetAlreadyExists"
+      );
     });
     /**
      * Missing tests:

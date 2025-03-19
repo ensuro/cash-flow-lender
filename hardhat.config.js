@@ -23,6 +23,13 @@ module.exports = {
       evmVersion: "cancun",
     },
   },
+  networks: {
+    hardhat: {
+      // Adding this setting just to unlock error when using hardhat-exposed for tests.
+      // But anyway, in Polygon the limit is 32KB, not 24KB - https://governance.polygon.technology/proposals/PIP-30/
+      allowUnlimitedContractSize: true,
+    },
+  },
   contractSizer: {
     alphaSort: true,
     runOnCompile: false,
