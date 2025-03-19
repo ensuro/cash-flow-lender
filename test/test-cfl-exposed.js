@@ -123,4 +123,20 @@ describe("CashFlowLender pure functions tests", function () {
     const uniqueSelectors = fakeSelectors.filter((value, index, array) => array.indexOf(value) === index);
     expect(fakeSelectors.length).to.equal(uniqueSelectors.length);
   });
+
+  it("Checks __CashFlowLender_init_unchained can't be called unless initializing", async () => {
+    const { cfl } = await helpers.loadFixture(setUp);
+    await expect(cfl.$__CashFlowLender_init_unchained(ZeroAddress)).to.be.revertedWithCustomError(
+      cfl,
+      "NotInitializing"
+    );
+  });
+
+  it("Checks __CashFlowLender_init can't be called unless initializing", async () => {
+    const { cfl } = await helpers.loadFixture(setUp);
+    await expect(cfl.$__CashFlowLender_init("Foo", "bar", ZeroAddress)).to.be.revertedWithCustomError(
+      cfl,
+      "NotInitializing"
+    );
+  });
 });
