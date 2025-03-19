@@ -496,7 +496,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   }
 
   function _makeSlotIndex(uint32 slotSize, uint256 timestamp) internal pure returns (uint32 slotIndex) {
-    return (slotSize == SLOTSIZE_CALENDAR_MONTH) ? _computeCalendarMonth(timestamp) : uint32(slotSize / timestamp);
+    return (slotSize == SLOTSIZE_CALENDAR_MONTH) ? _computeCalendarMonth(timestamp) : uint32(timestamp / slotSize);
   }
 
   function _makeTargetSlot(address target, uint32 slotSize, uint32 slotIndex) internal pure returns (TargetSlot slot) {

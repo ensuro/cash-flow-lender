@@ -13,15 +13,16 @@
     "hardhat": "^2.22.18",
     "hardhat-contract-sizer": "^2.10.0",
     "hardhat-dependency-compiler": "^1.2.1",
+    "hardhat-exposed": "^0.3.18",
     "prettier": "^3.4.2",
     "solhint": "^5.0.5",
     "solhint-plugin-prettier": "^0.1.0"
   },
   "dependencies": {
-    "@ensuro/core": "^2.9.1",
-    "@ensuro/utils": "^0.2.4",
     "@account-abstraction/contracts": "^0.7.0",
     "@ensuro/account-abstraction": "^0.1.0",
+    "@ensuro/core": "^2.9.1",
+    "@ensuro/utils": "^0.2.4",
     "@openzeppelin/contracts": "^5.2.0",
     "@openzeppelin/contracts-upgradeable": "^5.2.0"
   }

@@ -2,6 +2,8 @@ require("@openzeppelin/hardhat-upgrades");
 require("hardhat-dependency-compiler");
 require("hardhat-contract-sizer");
 require("@nomicfoundation/hardhat-toolbox");
+require("hardhat-exposed");
+
 const hretry = require("@ensuro/utils/js/hardhat-retry");
 const verifiableBinaries = require("@ensuro/utils/js/verifiableBinaries");
 
