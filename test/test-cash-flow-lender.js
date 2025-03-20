@@ -1485,6 +1485,116 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(0);
     });
 
+    variant.tagit("It doesn't mix debt of different slots", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo, yieldVault } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      const premium = _A(70);
+      const { callPromise, getPolicies } = await forwardPolicies(variant, ret, [{ premium }]);
+      await expect(callPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, premium, premium, premium);
+      const [newPolicy] = await getPolicies();
+      const slotIndex1 = captureAny.lastUint;
+
+      await helpers.time.increase(DAY * 3);
+      const payout = _A(100);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, -payout, -payout, premium - payout);
+      const slotIndex2 = captureAny.lastUint;
+
+      // Slots are different since we increased two days
+      expect(slotIndex1).not.to.be.equal(slotIndex2);
+      expect(slotIndex1 + 3n).to.be.closeTo(slotIndex2, 1n); // 1 slot tolerance in case close to end of slot
+
+      expect(await cfl.totalAssets()).to.equal(_A(100));
+      expect(await cfl.currentDebt()).to.equal(premium - payout);
+
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex2)).to.equal(-payout);
+
+      await expect(() => cfl.connect(lp2).redeem(_A(90), lp2, lp2)).to.changeTokenBalances(
+        currency,
+        [cfl, lp2],
+        [-_A(90), _A(90)]
+      );
+      expect(await cfl.cashWithdrawable()).to.equal(_A(10) - premium + payout); // 40
+
+      // Check cashOutPayouts don't work on the initial slot because there debt is positive
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex1, _A(1), bo))
+        .to.be.revertedWithCustomError(cfl, "CashOutExceedsLimit")
+        .withArgs(_A(1), premium + _A(1));
+
+      // Check cashOutPayouts doesn't work on the second slot because of lack of cash
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout, bo)).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
+
+      // Transfer all the funds to the yield vault
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(40), _A(40)]
+      );
+
+      await yieldVault.setOverride(OverrideOption.withdraw, _A(30));
+
+      // It can also fail because not all the funds are withdrawable
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo)).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
+
+      await yieldVault.setOverride(OverrideOption.withdraw, await yieldVault.OVERRIDE_UNSET());
+
+      // Withdrawal of 40 now works
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo))
+        .to.emit(cfl, "CashOutPayout")
+        .withArgs(rm, DAY, slotIndex2, _A(40), -_A(60), bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex2, _A(40), -_A(60), premium - payout + _A(40))
+        .to.emit(yieldVault, "Withdraw") // Withdrawal from the yield vault
+        .withArgs(cfl, cfl, cfl, _A(40), _A(40));
+
+      // Repayment of the slotIndex1 debt
+      await expect(cfl.connect(bo).repayDebt(rm, DAY, slotIndex2, _A(1)))
+        .to.be.revertedWithCustomError(cfl, "RepaymentExceedsLimit")
+        .withArgs(_A(1), -payout + _A(40) - _A(1));
+
+      await currency.connect(bo).approve(cfl, premium);
+      await expect(cfl.connect(bo).repayDebt(rm, DAY, slotIndex1, premium))
+        .to.emit(cfl, "RepayDebt")
+        .withArgs(rm, DAY, slotIndex1, premium, _A(0), bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex1, -premium, 0, -payout + _A(40));
+      // Check allowance has been spent, because bo (the _msgSender) paid
+      expect(await currency.allowance(cfl, bo)).to.equal(0);
+
+      // Now the cashOutPayouts of the remaining debt with the customer works
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout - _A(40), bo))
+        .to.emit(cfl, "CashOutPayout")
+        .withArgs(rm, DAY, slotIndex2, payout - _A(40), 0, bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex2, payout - _A(40), 0, 0);
+
+      // Debt is 0 and everyone is happy!
+      expect(await cfl.currentDebt()).to.equal(0);
+    });
+
     variant.tagit("Can't add a target twice", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin } = ret;
