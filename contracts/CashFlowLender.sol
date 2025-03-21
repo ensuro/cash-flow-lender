@@ -326,7 +326,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetLimitsChanged} event
    */
-  function changeTargetLimits(address target, uint256 debtLimit, uint256 minLiquidity) external {
+  function setTargetLimits(address target, uint256 debtLimit, uint256 minLiquidity) external {
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetLimitsChanged(target, targetConfig.debtLimit, debtLimit, targetConfig.minLiquidity, minLiquidity);
     targetConfig.debtLimit = debtLimit.toUint96();
@@ -341,7 +341,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetStatusChanged} event
    */
-  function changeTargetStatus(address target, TargetStatus newStatus) external {
+  function setTargetStatus(address target, TargetStatus newStatus) external {
     // Check the newStatus != inactive. If you want to disable a target, move it to suspended
     require(newStatus != TargetStatus.inactive, CannotDeactivateTarget());
     TargetConfig storage targetConfig = _getTargetConfig(target);
@@ -362,7 +362,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetStatusChanged} event
    */
-  function changeTargetSlotSize(address target, uint32 newSlotSize) external {
+  function setTargetSlotSize(address target, uint32 newSlotSize) external {
     require(newSlotSize != 0, InvalidSlotSize());
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetSlotSizeChanged(target, targetConfig.slotSize, newSlotSize);
@@ -372,8 +372,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   /// @inheritdoc ERC165
   function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
     return
+      interfaceId == type(IERC721Receiver).interfaceId ||
       interfaceId == type(IPolicyHolder).interfaceId ||
       interfaceId == type(IPolicyHolderV2).interfaceId ||
+      interfaceId == type(IERC20).interfaceId ||
+      interfaceId == type(IERC20Metadata).interfaceId ||
+      interfaceId == type(IERC4626).interfaceId ||
       super.supportsInterface(interfaceId);
   }
 
