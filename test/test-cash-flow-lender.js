@@ -147,6 +147,15 @@ async function grantEnsuroRoles(ensAccMgr, component, ensRoles, grantTo) {
   }
 }
 
+async function addRMToPool({ premiumsAccount, pool, RiskModule, cfl, ensAccMgr }) {
+  const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
+    ensuroFee: 0.03,
+  });
+  // Grant Permissions to the CFL
+  await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
+  return rm;
+}
+
 async function vaultDeposit(vault, lp, amount, currency = undefined) {
   await currency.connect(lp).approve(vault, amount);
   await vault.connect(lp).deposit(amount, lp);
@@ -210,12 +219,6 @@ const variants = [
         bridge23,
       } = ret;
 
-      // Create and add the RiskModule
-      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
-      const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
-        ensuroFee: 0.03,
-      });
-
       // Create and setup the CFL
       const cfl = await hre.upgrades.deployProxy(
         CashFlowLender,
@@ -244,14 +247,16 @@ const variants = [
         bo,
       });
 
-      // Grant Permissions to the CFL
-      await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
+      // Create and add the RiskModule
+      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
+      const rm = await addRMToPool({ premiumsAccount, pool, cfl, RiskModule, ensAccMgr });
 
       return {
         ADMIN_ROLE,
         smartAccount: bridge23, // The bridge23 and the smart account are the same in this variant
         cfl,
         trustedForwarder: ZeroAddress,
+        RiskModule,
         rm,
         roles,
         ...ret,
@@ -309,12 +314,6 @@ const variants = [
         bridge23,
       } = ret;
 
-      // Create and add the RiskModule
-      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
-      const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
-        ensuroFee: 0.03,
-      });
-
       const EntryPoint = await ethers.getContractFactory("EntryPoint");
       const ep = await EntryPoint.deploy();
       const ERC2771ForwarderAccount = await ethers.getContractFactory("ERC2771ForwarderAccount");
@@ -351,8 +350,9 @@ const variants = [
         bo,
       });
 
-      // Grant Permissions to the CFL
-      await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
+      // Create and add the RiskModule
+      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
+      const rm = await addRMToPool({ premiumsAccount, pool, cfl, RiskModule, ensAccMgr });
 
       return {
         ADMIN_ROLE,
@@ -360,6 +360,7 @@ const variants = [
         smartAccount,
         cfl,
         trustedForwarder: smartAccount,
+        RiskModule,
         rm,
         roles,
         ...ret,
@@ -1834,6 +1835,81 @@ variants.forEach((variant) => {
 
       // Debt is 0 and everyone is happy!
       expect(await cfl.currentDebt()).to.equal(0);
+    });
+
+    variant.tagit("It doesn't mix debt of different targets", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+
+      const rm2 = await addRMToPool(ret);
+      await vaultDeposit(cfl, lp2, _A(200), currency);
+
+      const premium = _A(70);
+      let { callPromise } = await forwardPolicies(variant, ret, [{ premium }, { premium }]);
+      await expect(callPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, premium * 2n, premium * 2n, premium * 2n);
+      const slotIndex1 = captureAny.lastUint;
+
+      const premium2 = _A(50);
+      callPromise = (await forwardPolicies(variant, { ...ret, rm: rm2 }, [{ premium: premium2 }])).callPromise;
+
+      await variant.expectCustomError(ret, callPromise, cfl, "TargetNotFound", [rm2]);
+
+      await cfl.connect(cflAdmin).addTarget(rm2, WEEK, _A(1000), _A(0));
+      callPromise = (await forwardPolicies(variant, { ...ret, rm: rm2 }, [{ premium: premium2 }])).callPromise;
+
+      await expect(callPromise)
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm2, captureAny.value)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm2, WEEK, captureAny.uint, premium2, premium2, premium * 2n + premium2);
+
+      const slotIndex2 = captureAny.lastUint;
+      const newPolicyRM2 = captureAny.lastValue;
+
+      expect(slotIndex2).not.to.be.equal(slotIndex1);
+
+      expect(await cfl.currentDebt()).to.equal(premium * 2n + premium2);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium * 2n);
+      expect(await cfl.getDebtForPeriod(rm2, DAY, slotIndex1)).to.equal(0);
+      expect(await cfl.getDebtForPeriod(rm2, WEEK, slotIndex2)).to.equal(premium2);
+      expect(await cfl.getDebtForPeriod(rm, WEEK, slotIndex2)).to.equal(0);
+
+      const payout = _A(100);
+      const resolveCall = rm2.interface.encodeFunctionData("resolvePolicy", [newPolicyRM2, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+
+      // First make a wrong selector, because uses rm instead of rm2
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+      const resolveFakeSelector2 = await cfl.makeFakeSelector(rm2, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm2, resolveCall),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm2, resolveFakeSelector2]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector2]);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm2, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm2, newPolicyRM2.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm2, WEEK, slotIndex2, -payout, premium2 - payout, 2n * premium + premium2 - payout);
+
+      expect(await cfl.currentDebt()).to.equal(premium * 2n + premium2 - payout);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium * 2n);
+      expect(await cfl.getDebtForPeriod(rm2, DAY, slotIndex1)).to.equal(0);
+      expect(await cfl.getDebtForPeriod(rm2, WEEK, slotIndex2)).to.equal(premium2 - payout);
+      expect(await cfl.getDebtForPeriod(rm, WEEK, slotIndex2)).to.equal(0);
     });
 
     variant.tagit("Can't add a target twice", async () => {
