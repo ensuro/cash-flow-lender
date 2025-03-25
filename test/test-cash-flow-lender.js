@@ -158,7 +158,7 @@ async function addRMToPool({ premiumsAccount, pool, RiskModule, cfl, ensAccMgr }
 
 async function vaultDeposit(vault, lp, amount, currency = undefined) {
   await currency.connect(lp).approve(vault, amount);
-  await vault.connect(lp).deposit(amount, lp);
+  return vault.connect(lp).deposit(amount, lp);
 }
 
 async function forwardPolicies(variant, ret, policyParams) {
@@ -1926,22 +1926,120 @@ variants.forEach((variant) => {
         "TargetAlreadyExists"
       );
     });
-    /**
-     * Missing tests:
-     *
-     * 1. onXXX methods: check only policyPool can call them
-     * 2. Vault related methods: changing the yield vault, rebalance, etc.
-     * 3. Deposit and withdrawals and rebalance without debt
-     * 4. Batch methods
-     * 5. resolvePolicy methods.
-     * 6. Calls to replacePolicy (should use also the same forwardNewPolicy methods)
-     * 7. Calls to newPolicy with minLiquidity > 0 and 0 liquidity
-     * 8. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity
-     * 9. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity and (not) enough funds in the vault
-     * 10. repayDebt / cashOutPayouts
-     * 11. Target related methods
-     * 12. Calendar month calculation tests (can be made making _computeCalendarMonth visible and then disabling)
-     * 13. Current debt / totalAssets assertions
-     */
+
+    variant.tagit("Can refresh the CFL asset if PolicyPool changes the currency ", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const {
+        cfl,
+        rm,
+        cflAdmin,
+        admin,
+        lp,
+        lp2,
+        bo,
+        currency,
+        ensAccMgr,
+        premiumsAccount,
+        pool,
+        etk,
+        TestERC4626,
+        acMgr,
+        bridge23,
+      } = ret;
+
+      // First add some funds and create some policies
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      const premium = _A(70);
+      const [newPolicy] = await (await forwardPolicies(variant, ret, [{ premium }])).getPolicies();
+
+      const otherCurrency = await initCurrency(
+        { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000), extraArgs: [admin] },
+        [lp, lp2, bo],
+        [_A(INITIAL), _A(INITIAL), _A(INITIAL)]
+      );
+      const PolicyPoolV292 = await ethers.getContractFactory("@ensuro/core/PolicyPool@2.9.2");
+
+      const poolUpgrade1 = await PolicyPoolV292.deploy(ensAccMgr, currency);
+      const poolUpgrade2 = await PolicyPoolV292.deploy(ensAccMgr, otherCurrency);
+
+      // Check direct upgrade is impossible, that's why I need two upgrades
+      await expect(pool.upgradeTo(poolUpgrade2)).to.be.revertedWithCustomError(pool, "UpgradeCannotChangeCurrency");
+
+      await expect(pool.upgradeTo(poolUpgrade1)).not.to.be.reverted;
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(cfl, "NothingToRefresh");
+      await expect(pool.upgradeTo(poolUpgrade2)).not.to.be.reverted;
+
+      expect(await pool.currency()).to.equal(otherCurrency);
+      // Replace Ensuro reserves (this will be done differently in the real world)
+      await currency.connect(admin).grantRole(getRole("BURNER_ROLE"), admin);
+      await otherCurrency.connect(admin).grantRole(getRole("MINTER_ROLE"), admin);
+
+      const etkBalance = await currency.balanceOf(etk);
+      await currency.connect(admin).burn(etk, etkBalance);
+      await otherCurrency.connect(admin).mint(etk, etkBalance);
+
+      const paBalance = await currency.balanceOf(premiumsAccount);
+      await currency.connect(admin).burn(premiumsAccount, paBalance);
+      await otherCurrency.connect(admin).mint(premiumsAccount, paBalance);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(
+        cfl,
+        "CannotRefreshAssetWithCash"
+      );
+
+      await cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(
+        cfl,
+        "MustChangeYieldAssetBeforeRefresh"
+      );
+
+      const newYieldVault = await TestERC4626.deploy("Yield Vault", "YIELD", otherCurrency);
+
+      // Remove the assets from the vault, so the CFL has only debt. And install the new yieldVault
+      await cfl.connect(lp2).redeem(_A(30), lp2, lp2);
+      expect(await cfl.currentDebt()).to.equal(await cfl.totalAssets());
+
+      await cfl.connect(cflAdmin).setYieldVault(newYieldVault, false);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.emit(cfl, "AssetChanged").withArgs(currency, otherCurrency);
+
+      expect(await cfl.asset()).to.equal(otherCurrency);
+
+      expect(await currency.allowance(cfl, pool)).to.equal(0);
+      expect(await otherCurrency.allowance(cfl, pool)).to.equal(MaxUint256);
+      expect(await currency.allowance(cfl, newYieldVault)).to.equal(0);
+      expect(await otherCurrency.allowance(cfl, newYieldVault)).to.equal(MaxUint256);
+
+      await expect(() => vaultDeposit(cfl, lp2, _A(30), otherCurrency)).to.changeTokenBalances(
+        otherCurrency,
+        [cfl, lp2],
+        [_A(30), -_A(30)]
+      );
+
+      expect(await otherCurrency.balanceOf(cfl)).to.equal(_A(30));
+
+      const payout = _A(100);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, [resolveCall]))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, anyUint, anyUint, -_A(100), _A(70 - 100), _A(70 - 100));
+
+      expect(await otherCurrency.balanceOf(cfl)).to.equal(_A(130));
+
+      // Also new policies can be created
+      await expect((await forwardPolicies(variant, ret, [{ premium }])).callPromise).to.emit(pool, "NewPolicy");
+    });
   });
 });
