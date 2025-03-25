@@ -2041,5 +2041,14 @@ variants.forEach((variant) => {
       // Also new policies can be created
       await expect((await forwardPolicies(variant, ret, [{ premium }])).callPromise).to.emit(pool, "NewPolicy");
     });
+
+    variant.tagit("Can upgrade the CFL ", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, CashFlowLender, cflAdmin, pool, trustedForwarder } = ret;
+      const newCFLImpl = await CashFlowLender.deploy(trustedForwarder, pool);
+      await expect(cfl.connect(cflAdmin).upgradeToAndCall(newCFLImpl, ethers.toUtf8Bytes("")))
+        .to.emit(cfl, "Upgraded")
+        .withArgs(newCFLImpl);
+    });
   });
 });
