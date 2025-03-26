@@ -113,10 +113,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   }
 
   // keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC4626")) - 1)) & ~bytes32(uint256(0xff))
+  // solhint-disable-next-line const-name-snakecase
   bytes32 internal constant ERC4626StorageLocation = 0x0773e532dfede91f04b12a73d3d2acd361424f41f76b4fb79f090161e36b4e00;
 
   // Copied from OZ's ERC4626.sol, because the original function is private
   function _getERC4626StorageCFL() internal pure returns (ERC4626Storage storage $) {
+    // solhint-disable-next-line no-inline-assembly
     assembly {
       $.slot := ERC4626StorageLocation
     }
