@@ -283,6 +283,31 @@ const directTrustfullRM = {
     return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
   },
 
+  replacePolicyCall: async ({ rm }, oldPolicy, policyParams) => {
+    // returns the call, selector, and premium amount
+    const premium = policyParams.premium || MaxUint256;
+    const payout = policyParams.payout || _A(100);
+    const lossProb = policyParams.lossProb || _W("0.05");
+    const expiration = Math.max(
+      Number(oldPolicy.expiration),
+      policyParams.expiration || (await helpers.time.latest()) + 30 * DAY
+    );
+    // eslint-disable-next-line no-plusplus
+    const internalId = policyParams.internalId || ++uniqueInternalId;
+    const chargedPremium =
+      (premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium) - oldPolicy.premium;
+    const method = "replacePolicy";
+    const replacePolicyCall = rm.interface.encodeFunctionData(method, [
+      oldPolicy,
+      payout,
+      premium,
+      lossProb,
+      expiration,
+      internalId,
+    ]);
+    return { replacePolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
+  },
+
   callForwardMethod: async (ret, method, target, methodCall) =>
     ret.cfl.connect(ret.smartAccount)[method](target, methodCall),
   expectCustomError: async (_, operation, contract, errorName, errorArgs) =>
@@ -362,6 +387,7 @@ const aaTrustfullRM = {
   },
 
   createPolicyCall: directTrustfullRM.createPolicyCall,
+  replacePolicyCall: directTrustfullRM.replacePolicyCall,
 
   callForwardMethod: async (ret, method, target, methodCall) => {
     const { cfl, smartAccount, bridge23, ep } = ret;
@@ -1334,10 +1360,11 @@ variants.forEach((variant) => {
       expect(finalDebt).to.be.equal(newPolicy.premium - payout);
     });
 
-    it("Can create and resolve multiple policies using batch methods [!?rmIsFull]", async () => {
+    it("Can create, replace and resolve multiple policies using batch methods [!?rmIsFull]", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       await vaultDeposit(cfl, lp2, _A(1000), currency);
@@ -1348,14 +1375,73 @@ variants.forEach((variant) => {
 
       expect(await cfl.currentDebt()).to.be.closeTo(totalChargedPremium, _A(0.1));
 
+      const replaceCalls = [];
+      let replaceFakeSelector;
+      let totalChargedPremium2 = 0n;
+      const replacementPayout = _A(200); // Two times the original payout
+      for (let i = 0; i < 3; i++) {
+        const { replacePolicyCall, selector, chargedPremium } = await variant.replacePolicyCall(ret, newPolicies[i], {
+          payout: replacementPayout,
+        });
+        replaceCalls.push(replacePolicyCall);
+        replaceFakeSelector = await cfl.makeFakeSelector(rm, selector);
+        totalChargedPremium2 += chargedPremium;
+      }
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, replaceFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [replaceFakeSelector]);
+
+      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
+        cfl,
+        "BalanceDecreasedOnResolve",
+        [captureAny.value]
+      );
+      if (!variant.usesAA) expect(captureAny.lastValue).to.closeTo(totalChargedPremium2, 10n);
+
+      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
+      const replaceTx = await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, replaceCalls);
+      const replaceReceipt = await replaceTx.wait();
+
+      const replacePolicyEvents = getTransactionEvent(
+        pool.interface,
+        replaceReceipt,
+        "PolicyReplaced",
+        false,
+        getAddress(pool)
+      );
+
+      const replacementPolicyEvents = getTransactionEvent(
+        pool.interface,
+        replaceReceipt,
+        "NewPolicy",
+        false,
+        getAddress(pool)
+      );
+
       const resolveCalls = [];
       const payout = _A(90);
       for (let i = 0; i < 3; i++) {
         let resolveCall;
         if (i !== 2) {
-          resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicies[i], payout]);
+          resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [
+            replacementPolicyEvents[i].args.policy,
+            payout,
+          ]);
         } else {
-          resolveCall = rm.interface.encodeFunctionData("resolvePolicyFullPayout", [newPolicies[i], true]);
+          resolveCall = rm.interface.encodeFunctionData("resolvePolicyFullPayout", [
+            replacementPolicyEvents[i].args.policy,
+            true,
+          ]);
         }
         resolveCalls.push(resolveCall);
       }
@@ -1375,7 +1461,6 @@ variants.forEach((variant) => {
       );
 
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
-      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
       // Keeps failing, now with the other selector
       await variant.expectCustomError(
@@ -1389,6 +1474,7 @@ variants.forEach((variant) => {
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFullFakeSelector]);
 
       const initialDebt = await cfl.currentDebt();
+      expect(initialDebt).to.closeTo(totalChargedPremium + totalChargedPremium2, 10n);
       const slotSize = await cfl.SLOTSIZE_CALENDAR_MONTH();
       const now = new Date();
       const year = now.getUTCFullYear();
@@ -1397,16 +1483,16 @@ variants.forEach((variant) => {
 
       await expect(variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, resolveCalls))
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[0].id, payout)
+        .withArgs(rm, replacePolicyEvents[0].args.newPolicyId, payout)
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[2].id, newPolicies[2].payout)
+        .withArgs(rm, replacePolicyEvents[2].args.newPolicyId, replacementPayout)
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[1].id, payout)
+        .withArgs(rm, replacePolicyEvents[1].args.newPolicyId, payout)
         .to.emit(cfl, "DebtChanged")
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
       const finalDebt = await cfl.currentDebt();
-      expect(finalDebt).to.be.equal(initialDebt - payout - newPolicies[2].payout - payout);
+      expect(finalDebt).to.be.closeTo(initialDebt - payout - replacementPayout - payout, 10n);
     });
 
     it("Can handle empty resolve batch without errors", async () => {
