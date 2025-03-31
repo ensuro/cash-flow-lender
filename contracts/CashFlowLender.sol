@@ -61,8 +61,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    */
   uint32 public constant SLOTSIZE_CALENDAR_MONTH = type(uint32).max;
 
-  uint256 private constant JAN_1ST_2025 = 1735689600;
-  uint256 private constant SECONDS_PER_DAY = 86400;
+  uint256 internal constant JAN_1ST_2025 = 1735689600;
+  uint256 internal constant SECONDS_PER_DAY = 86400;
 
   /// @custom:oz-upgrades-unsafe-allow state-variable-immutable
   IPolicyPool internal immutable _policyPool;
@@ -102,13 +102,25 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   // keccak256(abi.encode(uint256(keccak256("ensuro.storage.CashFlowLender")) - 1)) & ~bytes32(uint256(0xff))
   // solhint-disable-next-line const-name-snakecase
-  bytes32 private constant CashFlowLenderStorageLocation =
+  bytes32 internal constant CashFlowLenderStorageLocation =
     0x0dff660c705ec490383ffafc9e8e3ab4714559f9ec8567c5380d4ad2dff5af00;
 
-  function _getCashFlowLenderStorage() private pure returns (CashFlowLenderStorage storage $) {
+  function _getCashFlowLenderStorage() internal pure returns (CashFlowLenderStorage storage $) {
     // solhint-disable-next-line no-inline-assembly
     assembly {
       $.slot := CashFlowLenderStorageLocation
+    }
+  }
+
+  // keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC4626")) - 1)) & ~bytes32(uint256(0xff))
+  // solhint-disable-next-line const-name-snakecase
+  bytes32 internal constant ERC4626StorageLocation = 0x0773e532dfede91f04b12a73d3d2acd361424f41f76b4fb79f090161e36b4e00;
+
+  // Copied from OZ's ERC4626.sol, because the original function is private
+  function _getERC4626StorageCFL() internal pure returns (ERC4626Storage storage $) {
+    // solhint-disable-next-line no-inline-assembly
+    assembly {
+      $.slot := ERC4626StorageLocation
     }
   }
 
@@ -147,6 +159,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   );
   event TargetStatusChanged(address indexed target, TargetStatus oldStatus, TargetStatus newStatus);
   event TargetSlotSizeChanged(address indexed target, uint32 oldSlotSize, uint32 newSlotSize);
+  event AssetChanged(address oldAsset, address newAsset);
 
   error InvalidPolicyPool();
   error OnlyPolicyPool(address sender);
@@ -163,6 +176,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error CashOutExceedsLimit(uint256 amount, int256 debtAfter);
   error RepaymentExceedsLimit(uint256 amount, int256 debtAfter);
   error CannotDeinvestYieldVault();
+  error NothingToRefresh();
+  error CannotRefreshAssetWithCash();
+  error MustChangeYieldAssetBeforeRefresh();
 
   modifier onlyPolicyPool() {
     // I intentionally use msg.sender instead of _msgSender() because I know the PolicyPool won't call
@@ -253,7 +269,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   function _setYieldVault(IERC4626 yieldVault_) internal {
     require(address(yieldVault_) != address(0), YieldVaultIsRequired());
-
+    // I explicitly avoid checking yieldVault_.asset() == asset().
+    // This is to support migration of the asset (from USDC bridged to USDC native) that is on the roadmap
+    // Only temporarily, during a migration we might have that difference
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     IERC4626 oldVault = $._yieldVault;
     $._yieldVault = yieldVault_;
@@ -326,7 +344,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetLimitsChanged} event
    */
-  function changeTargetLimits(address target, uint256 debtLimit, uint256 minLiquidity) external {
+  function setTargetLimits(address target, uint256 debtLimit, uint256 minLiquidity) external {
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetLimitsChanged(target, targetConfig.debtLimit, debtLimit, targetConfig.minLiquidity, minLiquidity);
     targetConfig.debtLimit = debtLimit.toUint96();
@@ -341,7 +359,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetStatusChanged} event
    */
-  function changeTargetStatus(address target, TargetStatus newStatus) external {
+  function setTargetStatus(address target, TargetStatus newStatus) external {
     // Check the newStatus != inactive. If you want to disable a target, move it to suspended
     require(newStatus != TargetStatus.inactive, CannotDeactivateTarget());
     TargetConfig storage targetConfig = _getTargetConfig(target);
@@ -362,7 +380,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    * Emits a {TargetStatusChanged} event
    */
-  function changeTargetSlotSize(address target, uint32 newSlotSize) external {
+  function setTargetSlotSize(address target, uint32 newSlotSize) external {
     require(newSlotSize != 0, InvalidSlotSize());
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetSlotSizeChanged(target, targetConfig.slotSize, newSlotSize);
@@ -372,13 +390,41 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   /// @inheritdoc ERC165
   function supportsInterface(bytes4 interfaceId) public view virtual override returns (bool) {
     return
+      interfaceId == type(IERC721Receiver).interfaceId ||
       interfaceId == type(IPolicyHolder).interfaceId ||
       interfaceId == type(IPolicyHolderV2).interfaceId ||
+      interfaceId == type(IERC20).interfaceId ||
+      interfaceId == type(IERC20Metadata).interfaceId ||
+      interfaceId == type(IERC4626).interfaceId ||
       super.supportsInterface(interfaceId);
   }
 
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address newImpl) internal view override {}
+
+  /**
+   * @dev Refreshes the asset of the vault, when the currency() of the PolicyPool changes
+   *
+   * Requires _balance() = 0 and yieldVault.asset() = _policyPool.currency()
+   *
+   * Emits a {TargetStatusChanged} event
+   */
+  function refreshAsset() external {
+    address oldAsset = asset();
+    address newAsset = address(_policyPool.currency());
+    require(oldAsset != newAsset, NothingToRefresh());
+    require(_balance() == 0, CannotRefreshAssetWithCash());
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    require($._yieldVault.asset() == newAsset, MustChangeYieldAssetBeforeRefresh());
+    ERC4626Storage storage $ERC4626 = _getERC4626StorageCFL();
+    $ERC4626._asset = IERC20(newAsset);
+    // Revokes old asset approvals and approves spending of the new assets
+    IERC20Metadata(oldAsset).approve(address($._yieldVault), 0);
+    IERC20Metadata(newAsset).approve(address($._yieldVault), type(uint256).max);
+    IERC20Metadata(oldAsset).approve(address(_policyPool), 0);
+    IERC20Metadata(newAsset).approve(address(_policyPool), type(uint256).max);
+    emit AssetChanged(oldAsset, newAsset);
+  }
 
   /// @inheritdoc IERC721Receiver
   function onERC721Received(
@@ -672,6 +718,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return int256($._totalDebt);
   }
 
+  function getDebtForPeriod(address target, uint32 slotSize, uint32 slotIndex) external view returns (int256) {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    return $._debtByPeriod[_makeTargetSlot(target, slotSize, slotIndex)];
+  }
+
   /// @inheritdoc ERC4626Upgradeable
   function totalAssets() public view override returns (uint256 assets) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
@@ -684,19 +735,19 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
-  function _cashWithdrawable() internal view returns (uint256) {
+  function cashWithdrawable() public view returns (uint256) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     return _balance() + $._yieldVault.maxWithdraw(address(this));
   }
 
   /// @inheritdoc ERC4626Upgradeable
   function maxRedeem(address owner) public view virtual override returns (uint256) {
-    return Math.min(super.maxRedeem(owner), convertToShares(_cashWithdrawable()));
+    return Math.min(super.maxRedeem(owner), convertToShares(cashWithdrawable()));
   }
 
   /// @inheritdoc ERC4626Upgradeable
   function maxWithdraw(address owner) public view virtual override returns (uint256) {
-    return Math.min(super.maxWithdraw(owner), _cashWithdrawable());
+    return Math.min(super.maxWithdraw(owner), cashWithdrawable());
   }
 
   function _withdraw(

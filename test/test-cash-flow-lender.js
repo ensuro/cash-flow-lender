@@ -1,7 +1,7 @@
 const { expect } = require("chai");
 const {
   amountFunction,
-  tagit,
+  tagitVariant,
   makeAllViewsPublic,
   setupAMSuperAdminRole,
   setupAMRole,
@@ -12,8 +12,15 @@ const {
   newCaptureAny,
   getTransactionEvent,
 } = require("@ensuro/utils/js/utils");
+const {
+  defaultPolicyParamsWithBucket,
+  defaultPolicyParamsWithParams,
+  makeFullQuoteMessage,
+  makeBucketQuoteMessage,
+  makeSignedQuote,
+} = require("@ensuro/core/js/utils");
 const { initCurrency } = require("@ensuro/utils/js/test-utils");
-const { DAY } = require("@ensuro/utils/js/constants");
+const { DAY, WEEK } = require("@ensuro/utils/js/constants");
 const { deployPool, deployPremiumsAccount, addRiskModule, addEToken } = require("../js/binary-ensuro-test-utils");
 const { packAccountGasLimits } = require("@ensuro/account-abstraction/js/userOp.js");
 
@@ -36,6 +43,13 @@ const TargetStatus = {
   active: 1,
   deprecated: 2,
   suspended: 3,
+};
+
+const OverrideOption = {
+  deposit: 0,
+  mint: 1,
+  withdraw: 2,
+  redeem: 3,
 };
 
 const roles = {
@@ -140,9 +154,16 @@ async function grantEnsuroRoles(ensAccMgr, component, ensRoles, grantTo) {
   }
 }
 
+async function addRMToPool({ premiumsAccount, pool, RiskModule, cfl, ensAccMgr }) {
+  const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {});
+  // Grant Permissions to the CFL
+  await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
+  return rm;
+}
+
 async function vaultDeposit(vault, lp, amount, currency = undefined) {
   await currency.connect(lp).approve(vault, amount);
-  await vault.connect(lp).deposit(amount, lp);
+  return vault.connect(lp).deposit(amount, lp);
 }
 
 async function forwardPolicies(variant, ret, policyParams) {
@@ -181,241 +202,337 @@ async function forwardPolicies(variant, ret, policyParams) {
 
 let uniqueInternalId = 1000; // Variable to generate consecutive internalIds
 
-const variants = [
-  {
-    name: "NoTrustedForwarder+Trustful",
-    tagit: tagit,
-    fixture: async () => {
-      const ret = await setUp();
-      const {
-        admin,
-        CashFlowLender,
-        yieldVault,
-        acMgr,
-        pool,
-        AccessManagedProxy,
-        premiumsAccount,
-        ensAccMgr,
-        lp,
-        lp2,
-        bo,
-        cflAdmin,
-        bridge23,
-      } = ret;
+const directTrustfullRM = {
+  name: "NoTrustedForwarder+Trustful",
+  fixture: async (rmClass) => {
+    const ret = await setUp();
+    const {
+      admin,
+      CashFlowLender,
+      yieldVault,
+      acMgr,
+      pool,
+      AccessManagedProxy,
+      premiumsAccount,
+      ensAccMgr,
+      lp,
+      lp2,
+      bo,
+      cflAdmin,
+      bridge23,
+    } = ret;
 
-      // Create and add the RiskModule
-      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
-      const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
-        ensuroFee: 0.03,
-      });
+    // Create and setup the CFL
+    const cfl = await hre.upgrades.deployProxy(CashFlowLender, [NAME, SYMB, await ethers.resolveAddress(yieldVault)], {
+      kind: "uups",
+      unsafeAllow: [
+        "delegatecall",
+        "missing-initializer-call", // This is to fix an error because it says we are not calling
+        // parent initializer
+      ],
+      proxyFactory: AccessManagedProxy,
+      constructorArgs: [ZeroAddress, await ethers.resolveAddress(pool)],
+      deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
+    });
+    const ADMIN_ROLE = await setupCFLRoles({
+      acMgr,
+      admin,
+      cfl,
+      cflAdmin,
+      lp,
+      lp2,
+      smartAccount: bridge23,
+      pool,
+      bo,
+    });
 
-      // Create and setup the CFL
-      const cfl = await hre.upgrades.deployProxy(
-        CashFlowLender,
-        [NAME, SYMB, await ethers.resolveAddress(yieldVault)],
-        {
-          kind: "uups",
-          unsafeAllow: [
-            "delegatecall",
-            "missing-initializer-call", // This is to fix an error because it says we are not calling
-            // parent initializer
-          ],
-          proxyFactory: AccessManagedProxy,
-          constructorArgs: [ZeroAddress, await ethers.resolveAddress(pool)],
-          deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
-        }
-      );
-      const ADMIN_ROLE = await setupCFLRoles({
-        acMgr,
-        admin,
-        cfl,
-        cflAdmin,
-        lp,
-        lp2,
-        smartAccount: bridge23,
-        pool,
-        bo,
-      });
+    // Create and add the RiskModule
+    const RiskModule = await ethers.getContractFactory(rmClass || "@ensuro/core/TrustfulRiskModule");
+    const rm = await addRMToPool({ premiumsAccount, pool, cfl, RiskModule, ensAccMgr });
 
-      // Grant Permissions to the CFL
-      await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
-
-      return {
-        ADMIN_ROLE,
-        smartAccount: bridge23, // The bridge23 and the smart account are the same in this variant
-        cfl,
-        trustedForwarder: ZeroAddress,
-        rm,
-        roles,
-        ...ret,
-      };
-    },
-
-    createPolicyCall: async ({ rm, cfl }, policyParams, onBehalfOf = undefined) => {
-      // returns the call, selector, and premium amount
-      const premium = policyParams.premium || MaxUint256;
-      const payout = policyParams.payout || _A(100);
-      const lossProb = policyParams.lossProb || _W("0.05");
-      const expiration = policyParams.expiration || (await helpers.time.latest()) + 30 * DAY;
-      // eslint-disable-next-line no-plusplus
-      const internalId = policyParams.internalId || ++uniqueInternalId;
-      const chargedPremium =
-        premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium;
-      const newPolicyCall = rm.interface.encodeFunctionData("newPolicy", [
-        payout,
-        premium,
-        lossProb,
-        expiration,
-        getAddress(onBehalfOf || cfl),
-        internalId,
-      ]);
-      return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction("newPolicy").selector };
-    },
-
-    callForwardMethod: async (ret, method, target, methodCall) =>
-      ret.cfl.connect(ret.smartAccount)[method](target, methodCall),
-    expectCustomError: async (_, operation, contract, errorName, errorArgs) =>
-      expect(operation)
-        .to.be.revertedWithCustomError(contract, errorName)
-        .withArgs(...errorArgs),
-    usesAA: false,
+    return {
+      ADMIN_ROLE,
+      smartAccount: bridge23, // The bridge23 and the smart account are the same in this variant
+      cfl,
+      trustedForwarder: ZeroAddress,
+      RiskModule,
+      rm,
+      roles,
+      ...ret,
+    };
   },
-  {
-    name: "SmartAccountForwarder+Trustful",
-    tagit: tagit,
-    fixture: async () => {
-      const ret = await setUp();
-      const {
-        admin,
-        CashFlowLender,
-        yieldVault,
-        acMgr,
-        pool,
-        AccessManagedProxy,
-        premiumsAccount,
-        ensAccMgr,
-        lp,
-        lp2,
-        bo,
-        cflAdmin,
-        bridge23,
-      } = ret;
 
-      // Create and add the RiskModule
-      const RiskModule = await ethers.getContractFactory("@ensuro/core/TrustfulRiskModule");
-      const rm = await addRiskModule(pool, premiumsAccount, RiskModule, {
-        ensuroFee: 0.03,
-      });
-
-      const EntryPoint = await ethers.getContractFactory("EntryPoint");
-      const ep = await EntryPoint.deploy();
-      const ERC2771ForwarderAccount = await ethers.getContractFactory("ERC2771ForwarderAccount");
-      const smartAccount = await ERC2771ForwarderAccount.deploy(ep, admin, [bridge23]);
-
-      await ep.depositTo(smartAccount, { value: _W(1) });
-
-      // Create and setup the CFL
-      const cfl = await hre.upgrades.deployProxy(
-        CashFlowLender,
-        [NAME, SYMB, await ethers.resolveAddress(yieldVault)],
-        {
-          kind: "uups",
-          unsafeAllow: [
-            "delegatecall",
-            "missing-initializer-call", // This is to fix an error because it says we are not calling
-            // parent initializer
-          ],
-          proxyFactory: AccessManagedProxy,
-          constructorArgs: [await ethers.resolveAddress(smartAccount), await ethers.resolveAddress(pool)],
-          deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
-        }
-      );
-
-      const ADMIN_ROLE = await setupCFLRoles({
-        acMgr,
-        admin,
-        cfl,
-        cflAdmin,
-        lp,
-        lp2,
-        smartAccount,
-        pool,
-        bo,
-      });
-
-      // Grant Permissions to the CFL
-      await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE", "REPLACER_ROLE", "RESOLVER_ROLE"], cfl);
-
-      return {
-        ADMIN_ROLE,
-        ep,
-        smartAccount,
-        cfl,
-        trustedForwarder: smartAccount,
-        rm,
-        roles,
-        ...ret,
-      };
-    },
-
-    createPolicyCall: async ({ rm, cfl }, policyParams, onBehalfOf = undefined) => {
-      // returns the call, selector, and premium amount
-      const premium = policyParams.premium || MaxUint256;
-      const payout = policyParams.payout || _A(100);
-      const lossProb = policyParams.lossProb || _W("0.05");
-      const expiration = policyParams.expiration || (await helpers.time.latest()) + 30 * DAY;
-      // eslint-disable-next-line no-plusplus
-      const internalId = policyParams.internalId || ++uniqueInternalId;
-      const chargedPremium =
-        premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium;
-      const newPolicyCall = rm.interface.encodeFunctionData("newPolicy", [
-        payout,
-        premium,
-        lossProb,
-        expiration,
-        getAddress(onBehalfOf || cfl),
-        internalId,
-      ]);
-      return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction("newPolicy").selector };
-    },
-
-    callForwardMethod: async (ret, method, target, methodCall) => {
-      const { cfl, smartAccount, bridge23, ep } = ret;
-      const forwardCall = cfl.interface.encodeFunctionData(method, [await ethers.resolveAddress(target), methodCall]);
-      const executeCall = smartAccount.interface.encodeFunctionData("execute", [
-        await ethers.resolveAddress(cfl),
-        0,
-        forwardCall,
-      ]);
-      const nonce = await ret.smartAccount.getNonce();
-      const userOp = [
-        await ethers.resolveAddress(ret.smartAccount),
-        nonce,
-        ethers.toUtf8Bytes(""),
-        executeCall,
-        packAccountGasLimits(999999, 999999),
-        999999,
-        packAccountGasLimits(1e9, 1e9),
-        ethers.toUtf8Bytes(""),
-      ];
-      const userOpHash = await ep.getUserOpHash([...userOp, ethers.toUtf8Bytes("")]);
-      const signature = await bridge23.signMessage(ethers.getBytes(userOpHash));
-      return ep.handleOps([[...userOp, signature]], bridge23);
-    },
-    usesAA: true,
-    expectCustomError: async (ret, operation, contract, errorName) => {
-      await expect(operation)
-        .to.emit(ret.ep, "UserOperationRevertReason")
-        .withArgs(anyValue, anyValue, anyValue, captureAny.value);
-      expect(captureAny.lastValue.startsWith(contract.interface.getError(errorName).selector)).to.equal(true);
-      // errorArgs not checked
-    },
+  createPolicyCall: async ({ rm, cfl }, policyParams, onBehalfOf = undefined) => {
+    // returns the call, selector, and premium amount
+    const premium = policyParams.premium || MaxUint256;
+    const payout = policyParams.payout || _A(100);
+    const lossProb = policyParams.lossProb || _W("0.05");
+    const expiration = policyParams.expiration || (await helpers.time.latest()) + 30 * DAY;
+    // eslint-disable-next-line no-plusplus
+    const internalId = policyParams.internalId || ++uniqueInternalId;
+    const chargedPremium = premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium;
+    const method = policyParams.method || "newPolicy";
+    const newPolicyCall = rm.interface.encodeFunctionData(method, [
+      payout,
+      premium,
+      lossProb,
+      expiration,
+      getAddress(onBehalfOf || cfl),
+      internalId,
+    ]);
+    return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
   },
-];
+
+  replacePolicyCall: async ({ rm }, oldPolicy, policyParams) => {
+    // returns the call, selector, and premium amount
+    const premium = policyParams.premium || MaxUint256;
+    const payout = policyParams.payout || _A(100);
+    const lossProb = policyParams.lossProb || _W("0.05");
+    const expiration = Math.max(
+      Number(oldPolicy.expiration),
+      policyParams.expiration || (await helpers.time.latest()) + 30 * DAY
+    );
+    // eslint-disable-next-line no-plusplus
+    const internalId = policyParams.internalId || ++uniqueInternalId;
+    const chargedPremium =
+      (premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, expiration) : premium) - oldPolicy.premium;
+    const method = "replacePolicy";
+    const replacePolicyCall = rm.interface.encodeFunctionData(method, [
+      oldPolicy,
+      payout,
+      premium,
+      lossProb,
+      expiration,
+      internalId,
+    ]);
+    return { replacePolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
+  },
+
+  callForwardMethod: async (ret, method, target, methodCall) =>
+    ret.cfl.connect(ret.smartAccount)[method](target, methodCall),
+  expectCustomError: async (_, operation, contract, errorName, errorArgs) =>
+    expect(operation)
+      .to.be.revertedWithCustomError(contract, errorName)
+      .withArgs(...errorArgs),
+  usesAA: false,
+};
+
+const aaTrustfullRM = {
+  name: "SmartAccountForwarder+Trustful",
+  fixture: async (rmClass) => {
+    const ret = await setUp();
+    const {
+      admin,
+      CashFlowLender,
+      yieldVault,
+      acMgr,
+      pool,
+      AccessManagedProxy,
+      premiumsAccount,
+      ensAccMgr,
+      lp,
+      lp2,
+      bo,
+      cflAdmin,
+      bridge23,
+    } = ret;
+
+    const EntryPoint = await ethers.getContractFactory("EntryPoint");
+    const ep = await EntryPoint.deploy();
+    const ERC2771ForwarderAccount = await ethers.getContractFactory("ERC2771ForwarderAccount");
+    const smartAccount = await ERC2771ForwarderAccount.deploy(ep, admin, [bridge23]);
+
+    await ep.depositTo(smartAccount, { value: _W(1) });
+
+    // Create and setup the CFL
+    const cfl = await hre.upgrades.deployProxy(CashFlowLender, [NAME, SYMB, await ethers.resolveAddress(yieldVault)], {
+      kind: "uups",
+      unsafeAllow: [
+        "delegatecall",
+        "missing-initializer-call", // This is to fix an error because it says we are not calling
+        // parent initializer
+      ],
+      proxyFactory: AccessManagedProxy,
+      constructorArgs: [await ethers.resolveAddress(smartAccount), await ethers.resolveAddress(pool)],
+      deployFunction: async (hre_, opts, factory, ...args) => ozUpgradesDeploy(hre_, opts, factory, ...args, acMgr),
+    });
+
+    const ADMIN_ROLE = await setupCFLRoles({
+      acMgr,
+      admin,
+      cfl,
+      cflAdmin,
+      lp,
+      lp2,
+      smartAccount,
+      pool,
+      bo,
+    });
+
+    // Create and add the RiskModule
+    const RiskModule = await ethers.getContractFactory(rmClass || "@ensuro/core/TrustfulRiskModule");
+    const rm = await addRMToPool({ premiumsAccount, pool, cfl, RiskModule, ensAccMgr });
+
+    return {
+      ADMIN_ROLE,
+      ep,
+      smartAccount,
+      cfl,
+      trustedForwarder: smartAccount,
+      RiskModule,
+      rm,
+      roles,
+      ...ret,
+    };
+  },
+
+  createPolicyCall: directTrustfullRM.createPolicyCall,
+  replacePolicyCall: directTrustfullRM.replacePolicyCall,
+
+  callForwardMethod: async (ret, method, target, methodCall) => {
+    const { cfl, smartAccount, bridge23, ep } = ret;
+    const forwardCall = cfl.interface.encodeFunctionData(method, [await ethers.resolveAddress(target), methodCall]);
+    const executeCall = smartAccount.interface.encodeFunctionData("execute", [
+      await ethers.resolveAddress(cfl),
+      0,
+      forwardCall,
+    ]);
+    const nonce = await ret.smartAccount.getNonce();
+    const userOp = [
+      await ethers.resolveAddress(ret.smartAccount),
+      nonce,
+      ethers.toUtf8Bytes(""),
+      executeCall,
+      packAccountGasLimits(999999, 999999),
+      999999,
+      packAccountGasLimits(1e9, 1e9),
+      ethers.toUtf8Bytes(""),
+    ];
+    const userOpHash = await ep.getUserOpHash([...userOp, ethers.toUtf8Bytes("")]);
+    const signature = await bridge23.signMessage(ethers.getBytes(userOpHash));
+    return ep.handleOps([[...userOp, signature]], bridge23);
+  },
+  usesAA: true,
+  expectCustomError: async (ret, operation, contract, errorName) => {
+    await expect(operation)
+      .to.emit(ret.ep, "UserOperationRevertReason")
+      .withArgs(anyValue, anyValue, anyValue, captureAny.value);
+    const errorSelector = captureAny.lastValue.slice(0, 10);
+    const expectedSelector = contract.interface.getError(errorName).selector;
+    if (errorSelector !== expectedSelector) {
+      for (const errorFragment of contract.interface.fragments.filter((f) => f.type === "error")) {
+        if (errorFragment.selector === errorSelector) {
+          expect(errorFragment.name).to.equal(errorName);
+        }
+      }
+    }
+    expect(expectedSelector).to.equal(errorSelector);
+    // errorArgs not checked
+  },
+};
+
+const aaFullRM = {
+  name: "SmartAccountForwarder+FullSignedBucketRM",
+  fixture: async () => {
+    const ret = await aaTrustfullRM.fixture("@ensuro/core/FullSignedBucketRiskModule@2.9.3");
+    const { bo, ensAccMgr, rm, cfl } = ret;
+    const fullSigner = bo; // Reuse the same account
+    await grantEnsuroRoles(ensAccMgr, rm, ["POLICY_CREATOR_ROLE"], cfl);
+    await grantEnsuroRoles(ensAccMgr, rm, ["FULL_PRICER_ROLE"], fullSigner);
+    return {
+      fullSigner,
+      ...ret,
+    };
+  },
+
+  createPolicyCall: async ({ rm, cfl, fullSigner }, policyParams, onBehalfOf = undefined) => {
+    // returns the call, selector, and premium amount
+    if (policyParams.payout === undefined) policyParams.payout = _A(100);
+    if (policyParams.lossProb === undefined) policyParams.lossProb = _W("0.05");
+    policyParams.rm = rm;
+
+    // eslint-disable-next-line no-plusplus
+    const internalId = policyParams.internalId || ++uniqueInternalId;
+    policyParams.policyData = ethers.keccak256(ethers.toBeHex(internalId));
+    const defaultParams = {
+      moc: _W(1.1),
+      jrCollRatio: 0n, // Only SrEtk
+      collRatio: _W(0.8),
+      ensuroPpFee: _W(0.1),
+      ensuroCocFee: _W(0.1),
+      jrRoc: _W("0.4"),
+      srRoc: _W("0.1"),
+    };
+    const method = policyParams.method || "newPolicyFullParams";
+    policyParams.params = { ...defaultParams, ...(policyParams.params || {}) };
+    const defaultFn = method === "newPolicyFullParams" ? defaultPolicyParamsWithParams : defaultPolicyParamsWithBucket;
+    policyParams = await defaultFn(policyParams); // Fills other defaults
+    let chargedPremium;
+    if (policyParams.premium === MaxUint256) {
+      chargedPremium =
+        method === "newPolicy"
+          ? await rm.getMinimumPremium(policyParams.payout, policyParams.lossProb, policyParams.expiration)
+          : await rm.getMinimumPremiumFullParams(
+              policyParams.payout,
+              policyParams.lossProb,
+              policyParams.expiration,
+              policyParams.params
+            );
+    } else {
+      chargedPremium = policyParams.premium;
+    }
+    const quoteFn = method === "newPolicyFullParams" ? makeFullQuoteMessage : makeBucketQuoteMessage;
+    const signature = await makeSignedQuote(fullSigner, policyParams, quoteFn);
+    const newPolicyCall = rm.interface.encodeFunctionData(method, [
+      policyParams.payout,
+      policyParams.premium,
+      policyParams.lossProb,
+      policyParams.expiration,
+      getAddress(onBehalfOf || cfl),
+      policyParams.policyData,
+      method === "newPolicy" ? 0n : policyParams.params, // bucketId = 0
+      signature.r,
+      signature.yParityAndS,
+      policyParams.validUntil,
+    ]);
+    return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
+  },
+
+  callForwardMethod: aaTrustfullRM.callForwardMethod,
+  usesAA: true,
+  rmIsFull: true,
+  expectCustomError: aaTrustfullRM.expectCustomError,
+};
+
+const directFullRM = {
+  name: "NoTrustedForwarder+FullSignedBucketRM",
+  fixture: async () => {
+    const ret = await directTrustfullRM.fixture("@ensuro/core/FullSignedBucketRiskModule@2.9.3");
+    const { bo, ensAccMgr, rm, cfl } = ret;
+    const fullSigner = bo; // Reuse the same account
+    await grantEnsuroRoles(ensAccMgr, rm, ["POLICY_CREATOR_ROLE"], cfl);
+    await grantEnsuroRoles(ensAccMgr, rm, ["FULL_PRICER_ROLE"], fullSigner);
+    return {
+      fullSigner,
+      ...ret,
+    };
+  },
+  createPolicyCall: aaFullRM.createPolicyCall,
+  usesAA: false,
+  rmIsFull: true,
+  callForwardMethod: directTrustfullRM.callForwardMethod,
+  expectCustomError: directTrustfullRM.expectCustomError,
+};
+
+const variants = [directTrustfullRM, aaTrustfullRM, aaFullRM, directFullRM];
 
 variants.forEach((variant) => {
+  // eslint-disable-next-line func-style
+  const it = (testDescription, test) => tagitVariant(variant, false, testDescription, test);
+  it.only = (testDescription, test) => tagitVariant(variant, true, testDescription, test);
+
   describe(`CashFlowLender contract tests - Variant:${variant.name}`, function () {
-    variant.tagit("Checks vault constructs with disabled initializer ", async () => {
+    it("Checks vault constructs with disabled initializer ", async () => {
       const { CashFlowLender, pool, yieldVault } = await helpers.loadFixture(variant.fixture);
       const newCFL = await CashFlowLender.deploy(ZeroAddress, pool);
       await expect(newCFL.deploymentTransaction()).to.emit(newCFL, "Initialized");
@@ -425,7 +542,7 @@ variants.forEach((variant) => {
       );
     });
 
-    variant.tagit("Initializes with the right values", async () => {
+    it("Initializes with the right values", async () => {
       const { cfl, pool, yieldVault, currency, acMgr, trustedForwarder, AccessManagedProxy } =
         await helpers.loadFixture(variant.fixture);
 
@@ -443,7 +560,7 @@ variants.forEach((variant) => {
       expect(await currency.allowance(cfl, yieldVault)).to.equal(MaxUint256);
     });
 
-    variant.tagit("Can forward a new policy", async () => {
+    it("Can forward a new policy", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -496,7 +613,7 @@ variants.forEach((variant) => {
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
     });
 
-    variant.tagit("Can forward a new policy owned by someone else", async () => {
+    it("Can forward a new policy owned by someone else", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
 
@@ -533,7 +650,7 @@ variants.forEach((variant) => {
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
     });
 
-    variant.tagit("should be able to change the yield vault when there are no funds", async function () {
+    it("should be able to change the yield vault (to non-zero) when there are no funds", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, TestERC4626, currency, cflAdmin, yieldVault } = ret;
 
@@ -542,6 +659,12 @@ variants.forEach((variant) => {
       expect(await currency.allowance(cfl, yieldVault)).to.equal(MaxUint256);
 
       const newVault = await TestERC4626.deploy("New Yield Vault", "NEWYIELD", currency);
+
+      // Checks ZeroAddress vault is forbidden
+      await expect(cfl.connect(cflAdmin).setYieldVault(ZeroAddress, false)).to.be.revertedWithCustomError(
+        cfl,
+        "YieldVaultIsRequired"
+      );
 
       await expect(cfl.connect(cflAdmin).setYieldVault(newVault, false))
         .to.emit(cfl, "YieldVaultChanged")
@@ -554,7 +677,7 @@ variants.forEach((variant) => {
       expect(await currency.allowance(cfl, newVault)).to.equal(MaxUint256); // New vault allowance approval MaxUint256
     });
 
-    variant.tagit("should be able to change the yield vault when there funds in the yield vault", async function () {
+    it("should be able to change the yield vault when there funds in the yield vault", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
 
@@ -595,83 +718,121 @@ variants.forEach((variant) => {
       expect(await currency.balanceOf(cfl)).to.equal(_A(600));
     });
 
-    variant.tagit(
-      "Should allow partial & MaxUint256 deposit into yield vault, and fail if there are not enough funds",
-      async function () {
-        const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
+    it("can't change the yield vault, if some funds remain there unless forced", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, TestERC4626, currency, cflAdmin, yieldVault, lp } = ret;
 
-        expect(await yieldVault.totalAssets()).to.equal(0);
-        expect(await cfl.totalAssets()).to.equal(0);
+      await vaultDeposit(cfl, lp, _A(1000), currency);
 
-        await vaultDeposit(cfl, lp, _A(1000), currency);
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(700), _A(700)]
+      );
 
-        expect(await cfl.totalAssets()).to.equal(_A(1000));
+      expect(await yieldVault.totalAssets()).to.equal(_A(700));
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
 
-        await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
-          currency,
-          [cfl, yieldVault],
-          [-_A(700), _A(700)]
-        );
+      await yieldVault.setOverride(OverrideOption.withdraw, _A(500));
 
-        expect(await yieldVault.totalAssets()).to.equal(_A(700));
+      const newVault = await TestERC4626.deploy("New Yield Vault", "NEWYIELD", currency);
 
-        await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(400))).to.be.revertedWithCustomError(
-          cfl,
-          "NotEnoughCash"
-        );
+      await expect(cfl.connect(cflAdmin).setYieldVault(newVault, false)).to.be.revertedWithCustomError(
+        cfl,
+        "CannotDeinvestYieldVault"
+      );
 
-        await expect(
-          () => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256) // Should be the _A(300) left on CFL
-        ).to.changeTokenBalances(currency, [cfl, yieldVault], [-_A(300), _A(300)]);
+      expect(await cfl.yieldVault()).to.equal(yieldVault);
 
-        expect(await yieldVault.totalAssets()).to.equal(_A(1000));
-      }
-    );
+      await expect(cfl.connect(cflAdmin).setYieldVault(newVault, true))
+        .to.emit(cfl, "YieldVaultChanged")
+        .withArgs(yieldVault, newVault);
+      expect(await cfl.yieldVault()).to.equal(newVault);
 
-    variant.tagit(
-      "Should allow partial & MaxUint256 withdraws from yield vault, fails if there are not enough funds",
-      async function () {
-        const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
+      expect(await yieldVault.totalAssets()).to.equal(_A(200)); // Some funds were not withdrawn
+      expect(await cfl.totalAssets()).to.equal(_A(800)); // 200 lost in the disconnected yield vault
 
-        expect(await yieldVault.totalAssets()).to.equal(0);
-        expect(await cfl.totalAssets()).to.equal(0);
+      expect(await newVault.totalAssets()).to.equal(0); // Balance not re-invested in the new vault after change
 
-        await vaultDeposit(cfl, lp, _A(1000), currency);
+      // Check new vault works fine
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(300))).to.changeTokenBalances(
+        currency,
+        [cfl, newVault],
+        [-_A(300), _A(300)]
+      );
+      expect(await newVault.totalAssets()).to.equal(_A(300));
+      expect(await currency.balanceOf(cfl)).to.equal(_A(500));
+    });
 
-        expect(await cfl.totalAssets()).to.equal(_A(1000));
+    it("Should allow partial & MaxUint256 deposit into yield vault, and fail if there are not enough funds", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
 
-        await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
-          currency,
-          [cfl, yieldVault],
-          [-_A(1000), _A(1000)]
-        );
+      expect(await yieldVault.totalAssets()).to.equal(0);
+      expect(await cfl.totalAssets()).to.equal(0);
 
-        expect(await yieldVault.totalAssets()).to.equal(_A(1000));
+      await vaultDeposit(cfl, lp, _A(1000), currency);
 
-        await expect(() => cfl.connect(cflAdmin).withdrawFromYieldVault(_A(300))).to.changeTokenBalances(
-          currency,
-          [cfl, yieldVault],
-          [_A(300), -_A(300)]
-        );
-        expect(await yieldVault.totalAssets()).to.equal(_A(700));
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
 
-        await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(_A(800))).to.be.revertedWithCustomError(
-          cfl,
-          "NotEnoughCash"
-        );
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(700))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(700), _A(700)]
+      );
 
-        await expect(
-          () => cfl.connect(cflAdmin).withdrawFromYieldVault(MaxUint256) // Should be the _A(700) left on Yield Vault
-        ).to.changeTokenBalances(currency, [cfl, yieldVault], [_A(700), -_A(700)]);
-        expect(await yieldVault.totalAssets()).to.equal(0);
-      }
-    );
+      expect(await yieldVault.totalAssets()).to.equal(_A(700));
 
-    // Missing: tests related to setYieldVault(..., true) when yieldVault.maxWithdraw() != yieldVault.totalAssets()
+      await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(400))).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
 
-    variant.tagit("should withdraw from yield vault when cash is insufficient", async function () {
+      await expect(
+        () => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256) // Should be the _A(300) left on CFL
+      ).to.changeTokenBalances(currency, [cfl, yieldVault], [-_A(300), _A(300)]);
+
+      expect(await yieldVault.totalAssets()).to.equal(_A(1000));
+    });
+
+    it("Should allow partial & MaxUint256 withdraws from yield vault, fails if there are not enough funds", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, cflAdmin, yieldVault, lp } = ret;
+
+      expect(await yieldVault.totalAssets()).to.equal(0);
+      expect(await cfl.totalAssets()).to.equal(0);
+
+      await vaultDeposit(cfl, lp, _A(1000), currency);
+
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
+
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(1000), _A(1000)]
+      );
+
+      expect(await yieldVault.totalAssets()).to.equal(_A(1000));
+
+      await expect(() => cfl.connect(cflAdmin).withdrawFromYieldVault(_A(300))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [_A(300), -_A(300)]
+      );
+      expect(await yieldVault.totalAssets()).to.equal(_A(700));
+
+      await expect(cfl.connect(cflAdmin).withdrawFromYieldVault(_A(800))).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
+
+      await expect(
+        () => cfl.connect(cflAdmin).withdrawFromYieldVault(MaxUint256) // Should be the _A(700) left on Yield Vault
+      ).to.changeTokenBalances(currency, [cfl, yieldVault], [_A(700), -_A(700)]);
+      expect(await yieldVault.totalAssets()).to.equal(0);
+    });
+
+    it("should withdraw from yield vault when cash is insufficient", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, yieldVault, lp, cflAdmin } = ret;
 
@@ -696,7 +857,43 @@ variants.forEach((variant) => {
       expect(await yieldVault.totalAssets()).to.equal(_A(400));
     });
 
-    variant.tagit("should fail to withdraw when CFL has not enough funds due to debt", async function () {
+    it("should consider yieldVault.maxWithdraw for CFL's maxWithdraw", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, yieldVault, lp, cflAdmin, admin } = ret;
+
+      await vaultDeposit(cfl, lp, _A(1000), currency);
+
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(_A(800))).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(800), _A(800)]
+      );
+
+      expect(await cfl.totalAssets()).to.equal(_A(1000));
+      expect(await yieldVault.totalAssets()).to.equal(_A(800));
+
+      expect(await cfl.maxWithdraw(lp)).to.equal(_A(1000));
+      expect(await cfl.maxRedeem(lp)).to.equal(_A(1000)); // 1:1 assets:shares
+
+      await yieldVault.setOverride(OverrideOption.withdraw, _A(500));
+
+      expect(await cfl.maxWithdraw(lp)).to.equal(_A(700));
+      expect(await cfl.maxRedeem(lp)).to.equal(_A(700)); // 1:1 assets:shares
+
+      await currency.connect(admin).grantRole(getRole("MINTER_ROLE"), yieldVault);
+      await yieldVault.discreteEarning(_A(250));
+
+      // Still the same because yieldVault.maxWithdraw didn't changed
+      expect(await cfl.maxWithdraw(lp)).to.equal(_A(700));
+      expect(await cfl.maxRedeem(lp)).to.closeTo(_A(700 / 1.25), _A(0.01)); // 1 share = 1.25 assets
+
+      await yieldVault.setOverride(OverrideOption.withdraw, await yieldVault.OVERRIDE_UNSET());
+
+      expect(await cfl.maxRedeem(lp)).to.equal(_A(1000)); // Not it can redeem the 1000 shares
+      expect(await cfl.maxWithdraw(lp)).to.closeTo(_A(1250), _A(0.01)); // But the withdrawable assets increased
+    });
+
+    it("should fail to withdraw when CFL has not enough funds due to debt", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp, cflAdmin, rm, pool, bridge23, acMgr, admin } = ret;
 
@@ -727,93 +924,97 @@ variants.forEach((variant) => {
       await expect(cfl.connect(lp).withdraw(availableCash, lp, lp)).to.not.be.reverted;
     });
 
-    variant.tagit(
-      "forwardNewPolicy deinvest from yieldVault if cash balance is less than minLiquidity",
-      async function () {
-        const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, currency, yieldVault, lp, cflAdmin, rm, pool, bridge23, acMgr, admin } = ret;
+    it("forwardNewPolicy deinvest from yieldVault if cash balance is less than minLiquidity", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, yieldVault, lp, cflAdmin, rm, pool, bridge23, acMgr, admin } = ret;
 
-        // Deposit 300 and send 200 to the yieldVault
-        await vaultDeposit(cfl, lp, _A(300), currency);
-        await cfl.connect(cflAdmin).depositIntoYieldVault(_A(200));
+      // Deposit 300 and send 200 to the yieldVault
+      await vaultDeposit(cfl, lp, _A(300), currency);
+      await cfl.connect(cflAdmin).depositIntoYieldVault(_A(200));
 
-        // Set minLiquidity = 250, so before any forwardNewPolicy it will try to have that amount in cash
-        await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(250));
+      // Set minLiquidity = 250, so before any forwardNewPolicy it will try to have that amount in cash
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(250));
 
-        let { newPolicyCall, selector } = await variant.createPolicyCall(ret, { payout: _A(1000), premium: _A(60) });
-        const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+      let { newPolicyCall, selector } = await variant.createPolicyCall(ret, {
+        payout: _A(1000),
+        premium: _A(60),
+        params: { moc: _W(1), ensuroPpFee: _W(0) }, // This will be ignored in the Trustful variants
+      });
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
 
-        await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
-        await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-        await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-          .to.emit(pool, "NewPolicy")
-          .withArgs(rm, captureAny.value)
-          .to.emit(yieldVault, "Withdraw")
-          .withArgs(cfl, cfl, cfl, captureAny.uint, anyUint);
-        let newPolicy = captureAny.lastValue;
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value)
+        .to.emit(yieldVault, "Withdraw")
+        .withArgs(cfl, cfl, cfl, captureAny.uint, anyUint);
+      let newPolicy = captureAny.lastValue;
 
-        expect(captureAny.lastUint).to.equal(_A(150)); // From 100 that already had in cash to 250
+      expect(captureAny.lastUint).to.equal(_A(150)); // From 100 that already had in cash to 250
 
-        expect(await currency.balanceOf(cfl)).to.equal(_A(250) - newPolicy.premium);
+      expect(await currency.balanceOf(cfl)).to.equal(_A(250) - newPolicy.premium);
 
-        // Then if I create another policy it will try to withdraw more, but since only 50 left in the yieldVault
-        // if will withdraw only 50 withdraw failing
-        newPolicyCall = (await variant.createPolicyCall(ret, { payout: _A(1000), premium: _A(60) })).newPolicyCall;
-        await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-          .to.emit(pool, "NewPolicy")
-          .withArgs(rm, captureAny.value)
-          .to.emit(yieldVault, "Withdraw")
-          .withArgs(cfl, cfl, cfl, captureAny.uint, anyUint);
-        newPolicy = captureAny.lastValue;
+      // Then if I create another policy it will try to withdraw more, but since only 50 left in the yieldVault
+      // if will withdraw only 50 withdraw failing
+      newPolicyCall = (
+        await variant.createPolicyCall(ret, {
+          payout: _A(1000),
+          premium: _A(60),
+          params: { moc: _W(1), ensuroPpFee: _W(0) }, // This will be ignored in the Trustful variants
+        })
+      ).newPolicyCall;
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value)
+        .to.emit(yieldVault, "Withdraw")
+        .withArgs(cfl, cfl, cfl, captureAny.uint, anyUint);
+      newPolicy = captureAny.lastValue;
 
-        expect(captureAny.lastUint).to.equal(_A(50)); // Just 50 remaining in the yieldVault
-        expect(await currency.balanceOf(cfl)).to.equal(_A(300) - _A(60 * 2));
-        expect(await currency.balanceOf(yieldVault)).to.equal(0);
-      }
-    );
+      expect(captureAny.lastUint).to.equal(_A(50)); // Just 50 remaining in the yieldVault
+      expect(await currency.balanceOf(cfl)).to.equal(_A(300) - _A(60 * 2));
+      expect(await currency.balanceOf(yieldVault)).to.equal(0);
+    });
 
-    variant.tagit(
-      "Withdraw should deinvest from yield vault when cash is insufficient & fail when funds not enough due to debt",
-      async function () {
-        const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, currency, yieldVault, lp, cflAdmin, rm, pool, bridge23, acMgr, admin } = ret;
+    it("Withdraw should deinvest from yield vault when cash is insufficient & fail when funds not enough due to debt", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, yieldVault, lp, cflAdmin, rm, pool, bridge23, acMgr, admin } = ret;
 
-        // Deposit 1000 and send 800 to the yieldVault
-        await vaultDeposit(cfl, lp, _A(1000), currency);
-        await cfl.connect(cflAdmin).depositIntoYieldVault(_A(800));
+      // Deposit 1000 and send 800 to the yieldVault
+      await vaultDeposit(cfl, lp, _A(1000), currency);
+      await cfl.connect(cflAdmin).depositIntoYieldVault(_A(800));
 
-        await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
-        const { newPolicyCall, selector } = await variant.createPolicyCall(ret, { payout: _A(1000) });
-        const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+      const { newPolicyCall, selector } = await variant.createPolicyCall(ret, { payout: _A(1000) });
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
 
-        await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
-        await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-        await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
-          .to.emit(pool, "NewPolicy")
-          .withArgs(rm, captureAny.value);
-        const newPolicy = captureAny.lastValue;
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value);
+      const newPolicy = captureAny.lastValue;
 
-        await cfl.connect(lp).withdraw(_A(600), lp, lp);
-        expect(await cfl.maxWithdraw(lp)).to.equal(_A(400) - newPolicy.premium);
+      await cfl.connect(lp).withdraw(_A(600), lp, lp);
+      expect(await cfl.maxWithdraw(lp)).to.equal(_A(400) - newPolicy.premium);
 
-        expect(await yieldVault.totalAssets()).to.be.equal(_A(400) - newPolicy.premium);
+      expect(await yieldVault.totalAssets()).to.be.equal(_A(400) - newPolicy.premium);
 
-        await expect(cfl.connect(lp).withdraw(_A(400), lp, lp)).to.be.revertedWithCustomError(
-          cfl,
-          "ERC4626ExceededMaxWithdraw"
-        );
+      await expect(cfl.connect(lp).withdraw(_A(400), lp, lp)).to.be.revertedWithCustomError(
+        cfl,
+        "ERC4626ExceededMaxWithdraw"
+      );
 
-        await expect(cfl.connect(lp).withdraw(await cfl.maxWithdraw(lp), lp, lp)).not.to.be.reverted;
+      await expect(cfl.connect(lp).withdraw(await cfl.maxWithdraw(lp), lp, lp)).not.to.be.reverted;
 
-        expect(await yieldVault.totalAssets()).to.be.equal(0);
-        expect(await cfl.totalAssets()).to.be.equal(newPolicy.premium);
-      }
-    );
+      expect(await yieldVault.totalAssets()).to.be.equal(0);
+      expect(await cfl.totalAssets()).to.be.equal(newPolicy.premium);
+    });
 
-    variant.tagit("Should restrict onXXX methods to be callable only by the PolicyPool", async function () {
+    it("Should restrict onXXX methods to be callable only by the PolicyPool", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin, acMgr, admin } = ret;
 
@@ -840,7 +1041,7 @@ variants.forEach((variant) => {
       );
     });
 
-    variant.tagit("Can forward a single new policy using batch method", async () => {
+    it("Can forward a single new policy using batch method", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -883,7 +1084,7 @@ variants.forEach((variant) => {
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
     });
 
-    variant.tagit("Can forward multiple new policies using batch method", async () => {
+    it("Can forward multiple new policies using batch method", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -972,7 +1173,135 @@ variants.forEach((variant) => {
       expect(capTotalDebt.lastUint).to.be.closeTo(totalChargedPremium + totalPremium, _A(0.01));
     });
 
-    variant.tagit("Does nothing when calling forwardNewPolicyBatch with an empty array", async () => {
+    it("Can forward multiple new policies owned by someone else using batch method", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      let policyCalls = [];
+      let selectors = [];
+      let totalChargedPremium = _A(0);
+
+      for (let i = 0; i < 3; i++) {
+        const { newPolicyCall, chargedPremium, selector } = await variant.createPolicyCall(ret, {}, anon);
+        policyCalls.push(newPolicyCall);
+        selectors.push(selector);
+        totalChargedPremium += chargedPremium;
+      }
+
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+      const ownedPolicyFakeSelector = await cfl.makeFakeSelector(rm, await cfl.OWN_POLICY_SELECTOR());
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await vaultDeposit(cfl, lp2, _A(1000), currency);
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, ownedPolicyFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [ownedPolicyFakeSelector]);
+
+      const receipt = await (await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls)).wait();
+      const newPolicyEvents = getTransactionEvent(pool.interface, receipt, "NewPolicy", false, getAddress(pool));
+      const newPolicies = newPolicyEvents.map((evt) => evt.args.policy);
+      const totalPremium = newPolicies.reduce((acc, curr) => acc + curr.premium, 0n);
+      expect(totalPremium).to.closeTo(totalChargedPremium, _A("0.01"));
+
+      // Check the policies are owned by anon
+      for (const policy of newPolicies) {
+        expect(await pool.ownerOf(policy.id)).to.equal(anon);
+      }
+    });
+
+    it("Can forward heterogeneus new policies using batch method", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon, ensAccMgr, fullSigner } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      await vaultDeposit(cfl, lp2, _A(1000), currency);
+
+      let policyCalls = [];
+      let selectors = [];
+      let totalChargedPremium = _A(0);
+
+      if (variant.rmIsFull) {
+        await grantEnsuroRoles(ensAccMgr, rm, ["PRICER_ROLE"], fullSigner);
+      }
+      const inputs = [
+        [ret, {}], // newPolicy onBehalfOf = cfl
+        [ret, { method: variant.rmIsFull ? "newPolicy" : "newPolicyFull" }, anon], // newPolicyFull onBehalfOf = anon
+        [ret, {}, lp2], // newPolicy onBehalfOf = lp2
+      ];
+
+      for (let i = 0; i < 3; i++) {
+        const { newPolicyCall, chargedPremium, selector } = await variant.createPolicyCall(...inputs[i]);
+        policyCalls.push(newPolicyCall);
+        selectors.push(selector);
+        totalChargedPremium += chargedPremium;
+      }
+
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+      const batchFakeSelector2 = await cfl.makeFakeSelector(rm, selectors[1]);
+      const ownedPolicyFakeSelector = await cfl.makeFakeSelector(rm, await cfl.OWN_POLICY_SELECTOR());
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      // Keeps failing because of missing newPolicyFull selector
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector2]
+      );
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector2]);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, ownedPolicyFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [ownedPolicyFakeSelector]);
+
+      const receipt = await (await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls)).wait();
+      const newPolicyEvents = getTransactionEvent(pool.interface, receipt, "NewPolicy", false, getAddress(pool));
+      const newPolicies = newPolicyEvents.map((evt) => evt.args.policy);
+      const totalPremium = newPolicies.reduce((acc, curr) => acc + curr.premium, 0n);
+      expect(totalPremium).to.closeTo(totalChargedPremium, _A("0.01"));
+
+      // Check the policies are owned by anon
+      expect(await pool.ownerOf(newPolicies[0].id)).to.equal(cfl);
+      expect(await pool.ownerOf(newPolicies[1].id)).to.equal(anon);
+      expect(await pool.ownerOf(newPolicies[2].id)).to.equal(lp2);
+    });
+
+    it("Does nothing when calling forwardNewPolicyBatch with an empty array", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin, pool } = ret;
 
@@ -988,7 +1317,7 @@ variants.forEach((variant) => {
       expect(await cfl.currentDebt()).to.equal(initialDebt);
     });
 
-    variant.tagit("Can resolve a single policy using batch method", async () => {
+    it("Can resolve a single policy using batch method", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -1031,10 +1360,11 @@ variants.forEach((variant) => {
       expect(finalDebt).to.be.equal(newPolicy.premium - payout);
     });
 
-    variant.tagit("Can create and resolve multiple policies using batch methods", async () => {
+    it("Can create, replace and resolve multiple policies using batch methods [!?rmIsFull]", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       await vaultDeposit(cfl, lp2, _A(1000), currency);
@@ -1045,14 +1375,82 @@ variants.forEach((variant) => {
 
       expect(await cfl.currentDebt()).to.be.closeTo(totalChargedPremium, _A(0.1));
 
-      const resolveCalls = [];
-      const payout = _A(100);
+      const replaceCalls = [];
+      let replaceFakeSelector;
+      let totalChargedPremium2 = 0n;
+      const replacementPayout = _A(200); // Two times the original payout
       for (let i = 0; i < 3; i++) {
-        const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicies[i], payout]);
+        const { replacePolicyCall, selector, chargedPremium } = await variant.replacePolicyCall(ret, newPolicies[i], {
+          payout: replacementPayout,
+        });
+        replaceCalls.push(replacePolicyCall);
+        replaceFakeSelector = await cfl.makeFakeSelector(rm, selector);
+        totalChargedPremium2 += chargedPremium;
+      }
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, replaceFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [replaceFakeSelector]);
+
+      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
+        cfl,
+        "BalanceDecreasedOnResolve",
+        [captureAny.value]
+      );
+      if (!variant.usesAA) expect(captureAny.lastValue).to.closeTo(totalChargedPremium2, 10n);
+
+      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
+      const replaceTx = await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, replaceCalls);
+      const replaceReceipt = await replaceTx.wait();
+
+      const replacePolicyEvents = getTransactionEvent(
+        pool.interface,
+        replaceReceipt,
+        "PolicyReplaced",
+        false,
+        getAddress(pool)
+      );
+
+      const replacementPolicyEvents = getTransactionEvent(
+        pool.interface,
+        replaceReceipt,
+        "NewPolicy",
+        false,
+        getAddress(pool)
+      );
+
+      const resolveCalls = [];
+      const payout = _A(90);
+      for (let i = 0; i < 3; i++) {
+        let resolveCall;
+        if (i !== 2) {
+          resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [
+            replacementPolicyEvents[i].args.policy,
+            payout,
+          ]);
+        } else {
+          resolveCall = rm.interface.encodeFunctionData("resolvePolicyFullPayout", [
+            replacementPolicyEvents[i].args.policy,
+            true,
+          ]);
+        }
         resolveCalls.push(resolveCall);
       }
       const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
       const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+      const resolveFullFakeSelector = await cfl.makeFakeSelector(
+        rm,
+        rm.interface.getFunction("resolvePolicyFullPayout").selector
+      );
 
       await variant.expectCustomError(
         ret,
@@ -1062,31 +1460,42 @@ variants.forEach((variant) => {
         [bridge23, rm, resolveFakeSelector]
       );
 
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+
+      // Keeps failing, now with the other selector
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, resolveCalls),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, resolveFullFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFullFakeSelector]);
+
       const initialDebt = await cfl.currentDebt();
+      expect(initialDebt).to.closeTo(totalChargedPremium + totalChargedPremium2, 10n);
       const slotSize = await cfl.SLOTSIZE_CALENDAR_MONTH();
       const now = new Date();
       const year = now.getUTCFullYear();
       const month = now.getUTCMonth() + 1;
       const slotIndex = year * 100 + month;
 
-      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
-      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
-
       await expect(variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, resolveCalls))
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[0].id, payout)
+        .withArgs(rm, replacePolicyEvents[0].args.newPolicyId, payout)
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[1].id, payout)
+        .withArgs(rm, replacePolicyEvents[2].args.newPolicyId, replacementPayout)
         .to.emit(pool, "PolicyResolved")
-        .withArgs(rm, newPolicies[2].id, payout)
+        .withArgs(rm, replacePolicyEvents[1].args.newPolicyId, payout)
         .to.emit(cfl, "DebtChanged")
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
       const finalDebt = await cfl.currentDebt();
-      expect(finalDebt).to.be.lte(initialDebt);
+      expect(finalDebt).to.be.closeTo(initialDebt - payout - replacementPayout - payout, 10n);
     });
 
-    variant.tagit("Can handle empty resolve batch without errors", async () => {
+    it("Can handle empty resolve batch without errors", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -1111,7 +1520,7 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(initialDebt);
     });
 
-    variant.tagit("Can forward a resolve policy", async () => {
+    it("Can forward a resolve policy", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -1153,7 +1562,7 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(newPolicy.premium - payout);
     });
 
-    variant.tagit("Can forward a resolve policy with payout 0", async () => {
+    it("Can forward a resolve policy with payout 0", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
@@ -1187,7 +1596,7 @@ variants.forEach((variant) => {
       expect(finalDebt).to.be.equal(newPolicy.premium);
     });
 
-    variant.tagit("Can forward a resolve policy owned by someone else", async () => {
+    it("Can forward a resolve policy owned by someone else", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
 
@@ -1228,67 +1637,152 @@ variants.forEach((variant) => {
       await expect(resolutionTx).to.changeTokenBalance(currency, anon, _A(100));
     });
 
-    variant.tagit(
-      "Can't create new policies on deprecated targets, but it can resolve (unless suspended)",
-      async () => {
-        const ret = await helpers.loadFixture(variant.fixture);
-        const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+    it("Can't create new policies on deprecated targets, but it can resolve (unless suspended)", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, ensAccMgr } = ret;
 
-        await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
-        await vaultDeposit(cfl, lp2, _A(100), currency);
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      await vaultDeposit(cfl, lp2, _A(100), currency);
 
-        const [newPolicy1, newPolicy2] = await (await forwardPolicies(variant, ret, 2)).getPolicies();
+      const [newPolicy1, newPolicy2] = await (await forwardPolicies(variant, ret, 2)).getPolicies();
 
-        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.inactive)).to.be.revertedWithCustomError(
-          cfl,
-          "CannotDeactivateTarget"
-        );
-        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.deprecated))
-          .to.emit(cfl, "TargetStatusChanged")
-          .withArgs(rm, TargetStatus.active, TargetStatus.deprecated);
+      await expect(cfl.connect(cflAdmin).setTargetStatus(rm, TargetStatus.inactive)).to.be.revertedWithCustomError(
+        cfl,
+        "CannotDeactivateTarget"
+      );
+      await expect(cfl.connect(cflAdmin).setTargetStatus(rm, TargetStatus.deprecated))
+        .to.emit(cfl, "TargetStatusChanged")
+        .withArgs(rm, TargetStatus.active, TargetStatus.deprecated);
 
-        expect(await cfl.getTargetStatus(rm)).to.equal(TargetStatus.deprecated);
+      expect(await cfl.getTargetStatus(rm)).to.equal(TargetStatus.deprecated);
 
-        const { callPromise } = await forwardPolicies(variant, ret, 1);
-        await variant.expectCustomError(ret, callPromise, cfl, "TargetNotActive", [rm, TargetStatus.deprecated]);
+      const { callPromise } = await forwardPolicies(variant, ret, 1);
+      await variant.expectCustomError(ret, callPromise, cfl, "TargetNotActive", [rm, TargetStatus.deprecated]);
 
-        // Grant resolve fakeSelector
-        const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
-        const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
-        await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
-        await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+      // Grant resolve fakeSelector
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-        // Resolve the first policy
-        const payout = _A(100);
-        let resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy1, payout]);
+      // Resolve the first policy
+      const payout = _A(100);
+      let resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy1, payout]);
 
-        await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
-          .to.emit(pool, "PolicyResolved")
-          .withArgs(rm, newPolicy1.id, payout)
-          .to.emit(cfl, "DebtChanged");
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy1.id, payout)
+        .to.emit(cfl, "DebtChanged");
 
-        // Now suspend the target
-        await expect(cfl.connect(cflAdmin).changeTargetStatus(rm, TargetStatus.suspended))
-          .to.emit(cfl, "TargetStatusChanged")
-          .withArgs(rm, TargetStatus.deprecated, TargetStatus.suspended);
+      // Now suspend the target
+      await expect(cfl.connect(cflAdmin).setTargetStatus(rm, TargetStatus.suspended))
+        .to.emit(cfl, "TargetStatusChanged")
+        .withArgs(rm, TargetStatus.deprecated, TargetStatus.suspended);
 
-        resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy2, payout]);
+      resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy2, payout]);
 
-        // resolve fails when suspended
-        await variant.expectCustomError(
-          ret,
-          variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall),
-          cfl,
-          "TargetNotActive",
-          [rm, TargetStatus.suspended]
-        );
+      // resolve fails when suspended
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall),
+        cfl,
+        "TargetNotActive",
+        [rm, TargetStatus.suspended]
+      );
 
-        const finalDebt = await cfl.currentDebt();
-        expect(finalDebt).to.be.equal(newPolicy1.premium + newPolicy2.premium - payout);
-      }
-    );
+      // resolve fails when suspended - Same with the batch method
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, [resolveCall]),
+        cfl,
+        "TargetNotActive",
+        [rm, TargetStatus.suspended]
+      );
 
-    variant.tagit("Can repay debt of previous slot", async () => {
+      // resolve fails too when the resolution is direct to the RM (without going through the CFL)
+      await grantEnsuroRoles(ensAccMgr, rm, ["RESOLVER_ROLE"], cflAdmin);
+      await expect(rm.connect(cflAdmin).resolvePolicy([...newPolicy2], payout))
+        .to.be.revertedWithCustomError(cfl, "TargetNotActive")
+        .withArgs(rm, TargetStatus.suspended);
+
+      const finalDebt = await cfl.currentDebt();
+      expect(finalDebt).to.be.equal(newPolicy1.premium + newPolicy2.premium - payout);
+    });
+
+    it("It doesn't allow to create new policies if target limits exceeded", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(100), _A(0));
+      await vaultDeposit(cfl, lp2, _A(400), currency);
+
+      // First policy goes well
+      const [newPolicy] = await (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).getPolicies();
+
+      // Second policy fails because of target limit
+      let { callPromise } = await forwardPolicies(variant, ret, [{ premium: _A(80) }]);
+      await variant.expectCustomError(ret, callPromise, cfl, "DebtLimitExceeded", [_A(160), _A(100)]);
+
+      // The limits are per time-slot - So I can create a 2nd policy if it's in a different slot
+      await helpers.time.increase(DAY * 3);
+      await (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).getPolicies();
+
+      // 2nd policy fails
+      await variant.expectCustomError(ret, callPromise, cfl, "DebtLimitExceeded", [_A(160), _A(100)]);
+
+      // But if a payout (even if it's of a policy of a different slot) reduces the debt, it goes through
+      const payout = _A(60);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, -payout, _A(20), anyUint);
+
+      const slotIndex = captureAny.lastUint;
+
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex)).to.equal(_A(20));
+
+      await (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).getPolicies();
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex)).to.equal(_A(100));
+
+      callPromise = (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).callPromise;
+      await variant.expectCustomError(ret, callPromise, cfl, "DebtLimitExceeded", [_A(180), _A(100)]);
+
+      await expect(cfl.connect(cflAdmin).setTargetLimits(rm, _A(200), _A(0)))
+        .to.emit(cfl, "TargetLimitsChanged")
+        .withArgs(rm, _A(100), _A(200), _A(0), _A(0));
+
+      await (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).getPolicies();
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex)).to.equal(_A(180));
+
+      // Also the limits are reset if we change the slotSize
+      await expect(cfl.connect(cflAdmin).setTargetSlotSize(rm, 0)).to.be.revertedWithCustomError(
+        cfl,
+        "InvalidSlotSize"
+      );
+
+      await expect(cfl.connect(cflAdmin).setTargetSlotSize(rm, WEEK))
+        .to.emit(cfl, "TargetSlotSizeChanged")
+        .withArgs(rm, DAY, WEEK);
+
+      callPromise = (await forwardPolicies(variant, ret, [{ premium: _A(80) }])).callPromise;
+      await expect(callPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, WEEK, captureAny.uint, _A(80), _A(80), anyUint);
+
+      expect(captureAny.lastUint).not.be.equal(slotIndex);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex)).to.equal(_A(180));
+      expect(await cfl.getDebtForPeriod(rm, WEEK, captureAny.lastUint)).to.equal(_A(80));
+    });
+
+    it("Can repay debt of previous slot", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo } = ret;
 
@@ -1347,7 +1841,7 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(0);
     });
 
-    variant.tagit("Can cashout payouts of previous slot", async () => {
+    it("Can cashout payouts of previous slot", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo } = ret;
 
@@ -1392,7 +1886,202 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(0);
     });
 
-    variant.tagit("Can't add a target twice", async () => {
+    it("It doesn't mix debt of different slots", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo, yieldVault } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      const premium = _A(70);
+      const { callPromise, getPolicies } = await forwardPolicies(variant, ret, [{ premium }]);
+      await expect(callPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, premium, premium, premium);
+      const [newPolicy] = await getPolicies();
+      const slotIndex1 = captureAny.lastUint;
+
+      await helpers.time.increase(DAY * 3);
+      const payout = _A(100);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, -payout, -payout, premium - payout);
+      const slotIndex2 = captureAny.lastUint;
+
+      // Slots are different since we increased two days
+      expect(slotIndex1).not.to.be.equal(slotIndex2);
+      expect(slotIndex1 + 3n).to.be.closeTo(slotIndex2, 1n); // 1 slot tolerance in case close to end of slot
+
+      expect(await cfl.totalAssets()).to.equal(_A(100));
+      expect(await cfl.currentDebt()).to.equal(premium - payout);
+
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex2)).to.equal(-payout);
+
+      await expect(() => cfl.connect(lp2).redeem(_A(90), lp2, lp2)).to.changeTokenBalances(
+        currency,
+        [cfl, lp2],
+        [-_A(90), _A(90)]
+      );
+      expect(await cfl.cashWithdrawable()).to.equal(_A(10) - premium + payout); // 40
+
+      // Check cashOutPayouts don't work on the initial slot because there debt is positive
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex1, _A(1), bo))
+        .to.be.revertedWithCustomError(cfl, "CashOutExceedsLimit")
+        .withArgs(_A(1), premium + _A(1));
+
+      // Check cashOutPayouts doesn't work on the second slot because of lack of cash
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout, bo)).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
+
+      // Transfer all the funds to the yield vault
+      await expect(() => cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256)).to.changeTokenBalances(
+        currency,
+        [cfl, yieldVault],
+        [-_A(40), _A(40)]
+      );
+
+      await yieldVault.setOverride(OverrideOption.withdraw, _A(5));
+      expect(await cfl.maxWithdraw(lp2)).to.equal(_A(5));
+      // Withdrawal fails because it can't withdraw more than 5 from the yieldVault
+      await expect(cfl.connect(lp2).withdraw(_A(10), lp2, lp2)).to.be.revertedWithCustomError(
+        cfl,
+        "ERC4626ExceededMaxWithdraw"
+      );
+
+      // It can also fail because not all the funds are withdrawable
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo)).to.be.revertedWithCustomError(
+        cfl,
+        "NotEnoughCash"
+      );
+
+      await yieldVault.setOverride(OverrideOption.withdraw, await yieldVault.OVERRIDE_UNSET());
+
+      // Withdrawal of 40 now works
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo))
+        .to.emit(cfl, "CashOutPayout")
+        .withArgs(rm, DAY, slotIndex2, _A(40), -_A(60), bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex2, _A(40), -_A(60), premium - payout + _A(40))
+        .to.emit(yieldVault, "Withdraw") // Withdrawal from the yield vault
+        .withArgs(cfl, cfl, cfl, _A(40), _A(40));
+
+      // Repayment of the slotIndex1 debt
+      await expect(cfl.connect(bo).repayDebt(rm, DAY, slotIndex2, _A(1)))
+        .to.be.revertedWithCustomError(cfl, "RepaymentExceedsLimit")
+        .withArgs(_A(1), -payout + _A(40) - _A(1));
+
+      await currency.connect(bo).approve(cfl, premium);
+      await expect(cfl.connect(bo).repayDebt(rm, DAY, slotIndex1, premium))
+        .to.emit(cfl, "RepayDebt")
+        .withArgs(rm, DAY, slotIndex1, premium, _A(0), bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex1, -premium, 0, -payout + _A(40));
+      // Check allowance has been spent, because bo (the _msgSender) paid
+      expect(await currency.allowance(cfl, bo)).to.equal(0);
+
+      // Now the cashOutPayouts of the remaining debt with the customer works
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout - _A(40), bo))
+        .to.emit(cfl, "CashOutPayout")
+        .withArgs(rm, DAY, slotIndex2, payout - _A(40), 0, bo)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, slotIndex2, payout - _A(40), 0, 0);
+
+      // Debt is 0 and everyone is happy!
+      expect(await cfl.currentDebt()).to.equal(0);
+    });
+
+    it("It doesn't mix debt of different targets", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, ensAccMgr, fullSigner } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+
+      const rm2 = await addRMToPool(ret);
+      if (variant.rmIsFull) {
+        await grantEnsuroRoles(ensAccMgr, rm2, ["POLICY_CREATOR_ROLE"], cfl);
+        await grantEnsuroRoles(ensAccMgr, rm2, ["FULL_PRICER_ROLE"], fullSigner);
+      }
+      await vaultDeposit(cfl, lp2, _A(200), currency);
+
+      const premium = _A(70);
+      let { callPromise } = await forwardPolicies(variant, ret, [{ premium }, { premium }]);
+      await expect(callPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, premium * 2n, premium * 2n, premium * 2n);
+      const slotIndex1 = captureAny.lastUint;
+
+      const premium2 = _A(50);
+      callPromise = (await forwardPolicies(variant, { ...ret, rm: rm2 }, [{ premium: premium2 }])).callPromise;
+
+      await variant.expectCustomError(ret, callPromise, cfl, "TargetNotFound", [rm2]);
+
+      await cfl.connect(cflAdmin).addTarget(rm2, WEEK, _A(1000), _A(0));
+      callPromise = (await forwardPolicies(variant, { ...ret, rm: rm2 }, [{ premium: premium2 }])).callPromise;
+
+      await expect(callPromise)
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm2, captureAny.value)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm2, WEEK, captureAny.uint, premium2, premium2, premium * 2n + premium2);
+
+      const slotIndex2 = captureAny.lastUint;
+      const newPolicyRM2 = captureAny.lastValue;
+
+      expect(slotIndex2).not.to.be.equal(slotIndex1);
+
+      expect(await cfl.currentDebt()).to.equal(premium * 2n + premium2);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium * 2n);
+      expect(await cfl.getDebtForPeriod(rm2, DAY, slotIndex1)).to.equal(0);
+      expect(await cfl.getDebtForPeriod(rm2, WEEK, slotIndex2)).to.equal(premium2);
+      expect(await cfl.getDebtForPeriod(rm, WEEK, slotIndex2)).to.equal(0);
+
+      const payout = _A(100);
+      const resolveCall = rm2.interface.encodeFunctionData("resolvePolicy", [newPolicyRM2, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+
+      // First make a wrong selector, because uses rm instead of rm2
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+      const resolveFakeSelector2 = await cfl.makeFakeSelector(rm2, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm2, resolveCall),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm2, resolveFakeSelector2]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector2]);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm2, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm2, newPolicyRM2.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm2, WEEK, slotIndex2, -payout, premium2 - payout, 2n * premium + premium2 - payout);
+
+      expect(await cfl.currentDebt()).to.equal(premium * 2n + premium2 - payout);
+      expect(await cfl.getDebtForPeriod(rm, DAY, slotIndex1)).to.equal(premium * 2n);
+      expect(await cfl.getDebtForPeriod(rm2, DAY, slotIndex1)).to.equal(0);
+      expect(await cfl.getDebtForPeriod(rm2, WEEK, slotIndex2)).to.equal(premium2 - payout);
+      expect(await cfl.getDebtForPeriod(rm, WEEK, slotIndex2)).to.equal(0);
+    });
+
+    it("Can't add a target twice", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin } = ret;
 
@@ -1406,22 +2095,129 @@ variants.forEach((variant) => {
         "TargetAlreadyExists"
       );
     });
-    /**
-     * Missing tests:
-     *
-     * 1. onXXX methods: check only policyPool can call them
-     * 2. Vault related methods: changing the yield vault, rebalance, etc.
-     * 3. Deposit and withdrawals and rebalance without debt
-     * 4. Batch methods
-     * 5. resolvePolicy methods.
-     * 6. Calls to replacePolicy (should use also the same forwardNewPolicy methods)
-     * 7. Calls to newPolicy with minLiquidity > 0 and 0 liquidity
-     * 8. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity
-     * 9. Calls to newPolicy with minLiquidity > 0 and some<minLiquidity and (not) enough funds in the vault
-     * 10. repayDebt / cashOutPayouts
-     * 11. Target related methods
-     * 12. Calendar month calculation tests (can be made making _computeCalendarMonth visible and then disabling)
-     * 13. Current debt / totalAssets assertions
-     */
+
+    it("Can refresh the CFL asset if PolicyPool changes the currency ", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const {
+        cfl,
+        rm,
+        cflAdmin,
+        admin,
+        lp,
+        lp2,
+        bo,
+        currency,
+        ensAccMgr,
+        premiumsAccount,
+        pool,
+        etk,
+        TestERC4626,
+        acMgr,
+        bridge23,
+      } = ret;
+
+      // First add some funds and create some policies
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      const premium = _A(70);
+      const [newPolicy] = await (await forwardPolicies(variant, ret, [{ premium }])).getPolicies();
+
+      const otherCurrency = await initCurrency(
+        { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000), extraArgs: [admin] },
+        [lp, lp2, bo],
+        [_A(INITIAL), _A(INITIAL), _A(INITIAL)]
+      );
+      const PolicyPoolV292 = await ethers.getContractFactory("@ensuro/core/PolicyPool@2.9.3");
+
+      const poolUpgrade1 = await PolicyPoolV292.deploy(ensAccMgr, currency);
+      const poolUpgrade2 = await PolicyPoolV292.deploy(ensAccMgr, otherCurrency);
+
+      // Check direct upgrade is impossible, that's why I need two upgrades
+      await expect(pool.upgradeTo(poolUpgrade2)).to.be.revertedWithCustomError(pool, "UpgradeCannotChangeCurrency");
+
+      await expect(pool.upgradeTo(poolUpgrade1)).not.to.be.reverted;
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(cfl, "NothingToRefresh");
+      await expect(pool.upgradeTo(poolUpgrade2)).not.to.be.reverted;
+
+      expect(await pool.currency()).to.equal(otherCurrency);
+      // Replace Ensuro reserves (this will be done differently in the real world)
+      await currency.connect(admin).grantRole(getRole("BURNER_ROLE"), admin);
+      await otherCurrency.connect(admin).grantRole(getRole("MINTER_ROLE"), admin);
+
+      const etkBalance = await currency.balanceOf(etk);
+      await currency.connect(admin).burn(etk, etkBalance);
+      await otherCurrency.connect(admin).mint(etk, etkBalance);
+
+      const paBalance = await currency.balanceOf(premiumsAccount);
+      await currency.connect(admin).burn(premiumsAccount, paBalance);
+      await otherCurrency.connect(admin).mint(premiumsAccount, paBalance);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(
+        cfl,
+        "CannotRefreshAssetWithCash"
+      );
+
+      await cfl.connect(cflAdmin).depositIntoYieldVault(MaxUint256);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(
+        cfl,
+        "MustChangeYieldAssetBeforeRefresh"
+      );
+
+      const newYieldVault = await TestERC4626.deploy("Yield Vault", "YIELD", otherCurrency);
+
+      // Remove the assets from the vault, so the CFL has only debt. And install the new yieldVault
+      await cfl.connect(lp2).redeem(_A(30), lp2, lp2);
+      expect(await cfl.currentDebt()).to.equal(await cfl.totalAssets());
+
+      await cfl.connect(cflAdmin).setYieldVault(newYieldVault, false);
+
+      await expect(cfl.connect(cflAdmin).refreshAsset()).to.emit(cfl, "AssetChanged").withArgs(currency, otherCurrency);
+
+      expect(await cfl.asset()).to.equal(otherCurrency);
+
+      expect(await currency.allowance(cfl, pool)).to.equal(0);
+      expect(await otherCurrency.allowance(cfl, pool)).to.equal(MaxUint256);
+      expect(await currency.allowance(cfl, newYieldVault)).to.equal(0);
+      expect(await otherCurrency.allowance(cfl, newYieldVault)).to.equal(MaxUint256);
+
+      await expect(() => vaultDeposit(cfl, lp2, _A(30), otherCurrency)).to.changeTokenBalances(
+        otherCurrency,
+        [cfl, lp2],
+        [_A(30), -_A(30)]
+      );
+
+      expect(await otherCurrency.balanceOf(cfl)).to.equal(_A(30));
+
+      const payout = _A(100);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, [resolveCall]))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, anyUint, anyUint, -_A(100), _A(70 - 100), _A(70 - 100));
+
+      expect(await otherCurrency.balanceOf(cfl)).to.equal(_A(130));
+
+      // Also new policies can be created
+      await expect((await forwardPolicies(variant, ret, [{ premium }])).callPromise).to.emit(pool, "NewPolicy");
+    });
+
+    it("Can upgrade the CFL ", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, CashFlowLender, cflAdmin, pool, trustedForwarder } = ret;
+      const newCFLImpl = await CashFlowLender.deploy(trustedForwarder, pool);
+      await expect(cfl.connect(cflAdmin).upgradeToAndCall(newCFLImpl, ethers.toUtf8Bytes("")))
+        .to.emit(cfl, "Upgraded")
+        .withArgs(newCFLImpl);
+    });
   });
 });

@@ -21,8 +21,8 @@
   "dependencies": {
     "@account-abstraction/contracts": "^0.7.0",
     "@ensuro/account-abstraction": "^0.1.0",
-    "@ensuro/core": "^2.9.1",
-    "@ensuro/utils": "^0.2.4",
+    "@ensuro/core": "^2.9.3",
+    "@ensuro/utils": "^0.2.5",
     "@openzeppelin/contracts": "^5.2.0",
     "@openzeppelin/contracts-upgradeable": "^5.2.0"
   }
