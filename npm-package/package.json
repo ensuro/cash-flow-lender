@@ -1,0 +1,30 @@
+{
+  "name": "@ensuro/cash-flow-lender",
+  "description": "Contract to track the debt with partners that pay on a monthly basis, used by the Ensuro Protocol",
+  "version": "%%VERSION%%",
+  "files": [
+    "**/*.sol",
+    "/build",
+    "/js/*.js"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git@github.com:ensuro/cash-flow-lender.git"
+  },
+  "keywords": [
+    "solidity",
+    "ethereum",
+    "smart",
+    "contracts",
+    "decentralized",
+    "insurance",
+    "ensuro",
+    "erc4626"
+  ],
+  "author": "Ensuro <guillermo@ensuro.co>",
+  "license": "Apache-2.0",
+  "bugs": {
+    "url": "https://github.com/ensuro/cash-flow-lender/issues"
+  },
+  "homepage": "https://github.com/ensuro/cash-flow-lender#readme"
+}
