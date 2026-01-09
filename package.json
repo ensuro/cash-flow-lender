@@ -18,11 +18,11 @@
     "solhint-plugin-prettier": "^0.1.0"
   },
   "dependencies": {
-    "@ensuro/core": "^2.9.1",
-    "@ensuro/utils": "^0.2.3",
-    "@account-abstraction/contracts": "^0.7.0",
+    "@ensuro/core": "^3.0.0",
+    "@ensuro/utils": "^0.3.1",
+    "@account-abstraction/contracts": "^0.8.0",
     "@ensuro/account-abstraction": "^0.1.0",
-    "@openzeppelin/contracts": "^5.2.0",
-    "@openzeppelin/contracts-upgradeable": "^5.2.0"
+    "@openzeppelin/contracts": "^5.5.0",
+    "@openzeppelin/contracts-upgradeable": "^5.5.0"
   }
 }

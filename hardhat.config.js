@@ -12,13 +12,13 @@ verifiableBinaries.addTasks();
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.28",
+    version: "0.8.30",
     settings: {
       optimizer: {
         enabled: true,
         runs: 200,
       },
-      evmVersion: "cancun",
+      evmVersion: "prague",
     },
   },
   contractSizer: {
@@ -29,10 +29,13 @@ module.exports = {
   dependencyCompiler: {
     paths: [
       "@ensuro/utils/contracts/TestCurrency.sol",
+      "@ensuro/utils/contracts/TestCurrencyAC.sol",
       "@ensuro/utils/contracts/TestERC4626.sol",
       "@ensuro/account-abstraction/contracts/ERC2771ForwarderAccount.sol",
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
       "@account-abstraction/contracts/core/EntryPoint.sol",
+      "@ensuro/core/contracts/interfaces/IPolicyHolder.sol",
+      "@ensuro/core/contracts/interfaces/IPolicyHolderV2.sol",
     ],
   },
   verifiableBinaries: {

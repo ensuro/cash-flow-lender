@@ -237,7 +237,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     string memory symbol_,
     IERC4626 yieldVault_
   ) internal onlyInitializing {
-    __UUPSUpgradeable_init();
     address asset_ = address(_policyPool.currency());
     __ERC4626_init(IERC20(asset_));
     __ERC20_init(name_, symbol_);
@@ -416,6 +415,18 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   /// @inheritdoc IPolicyHolderV2
   function onPolicyReplaced(address, address, uint256, uint256) external view override onlyPolicyPool returns (bytes4) {
     return IPolicyHolderV2.onPolicyReplaced.selector;
+  }
+
+  /// @inheritdoc IPolicyHolder
+  function onPolicyCancelled(
+    address,
+    address,
+    uint256,
+    uint256,
+    uint256,
+    uint256
+  ) external view override onlyPolicyPool returns (bytes4) {
+    return IPolicyHolder.onPolicyCancelled.selector;
   }
 
   // Fix Context base contract duplicates
