@@ -16,6 +16,7 @@ jobs:
           cache: "npm"
       - run: npm ci
       - run: npx hardhat vb:downloadBinaries
+      - run: rm -rf cache artifacts
       - run: npx hardhat compile
       - run: npx hardhat size-contracts
       - run: npm run solhint
