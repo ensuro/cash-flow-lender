@@ -1,8 +1,7 @@
 const hre = require("hardhat");
 const { ethers } = hre;
-const { _W, grantRole } = require("@ensuro/utils/js/utils");
+const { _W } = require("@ensuro/utils/js/utils");
 const { deployProxy } = require("@ensuro/utils/js/test-utils");
-const { RiskModuleParameter } = require("@ensuro/core/js/enums");
 
 const { ZeroAddress } = ethers;
 
@@ -10,48 +9,33 @@ async function createRiskModule(
   pool,
   premiumsAccount,
   contractFactory,
-  {
-    rmName,
-    collRatio,
-    srRoc,
-    ensuroPPFee,
-    maxPayoutPerPolicy,
-    exposureLimit,
-    moc,
-    wallet,
-    extraArgs,
-    extraConstructorArgs,
-  }
+  { wallet, underwriterFactory, underwriter, extraArgs, extraConstructorArgs }
 ) {
   extraArgs = extraArgs || [];
   extraConstructorArgs = extraConstructorArgs || [];
-  const _A = pool._A || _W;
-  maxPayoutPerPolicy = maxPayoutPerPolicy !== undefined ? _A(maxPayoutPerPolicy) : _A(1000);
-  exposureLimit = exposureLimit !== undefined ? _A(exposureLimit) : _A(1000000);
 
   const poolAddr = await ethers.resolveAddress(pool);
   const paAddr = await ethers.resolveAddress(premiumsAccount);
   const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
-  const rm = await deployProxy(
-    ERC1967Proxy,
-    contractFactory,
-    [poolAddr, paAddr, ...extraConstructorArgs],
-    [
-      rmName || "RiskModule",
-      _W(collRatio) || _W(1),
-      _W(ensuroPPFee) || _W(0),
-      _W(srRoc) || _W("0.1"),
-      maxPayoutPerPolicy,
-      exposureLimit,
-      wallet || "0xdD2FD4581271e230360230F9337D5c0430Bf44C0", // Random address
-      ...extraArgs,
-    ]
-  );
 
-  if (moc !== undefined && moc != 1.0) {
-    moc = _W(moc);
-    await rm.setParam(RiskModuleParameter.moc, moc);
+  let underwriterAddr;
+  if (underwriter) {
+    // Reuse an existing underwriter instance
+    underwriterAddr = await ethers.resolveAddress(underwriter);
+  } else {
+    // Deploy a new underwriter of the specified type (default: FullTrustedUW)
+    const UnderwriterFactory = await ethers.getContractFactory(underwriterFactory || "@ensuro/core/FullTrustedUW");
+    const deployedUnderwriter = await UnderwriterFactory.deploy();
+    await deployedUnderwriter.waitForDeployment();
+    underwriterAddr = await ethers.resolveAddress(deployedUnderwriter);
   }
+
+  const defaultWallet = wallet || "0xdD2FD4581271e230360230F9337D5c0430Bf44C0";
+
+  const initArgs = [underwriterAddr, defaultWallet, ...extraArgs];
+
+  const rm = await deployProxy(ERC1967Proxy, contractFactory, [poolAddr, paAddr, ...extraConstructorArgs], initArgs);
+
   return rm;
 }
 
@@ -59,28 +43,12 @@ async function addRiskModule(
   pool,
   premiumsAccount,
   contractFactory,
-  {
-    rmName,
-    collRatio,
-    srRoc,
-    ensuroPPFee,
-    maxPayoutPerPolicy,
-    exposureLimit,
-    moc,
-    wallet,
-    extraArgs,
-    extraConstructorArgs,
-  }
+  { wallet, underwriterFactory, underwriter, extraArgs, extraConstructorArgs }
 ) {
   const rm = await createRiskModule(pool, premiumsAccount, contractFactory, {
-    rmName,
-    collRatio,
-    srRoc,
-    ensuroPPFee,
-    maxPayoutPerPolicy,
-    exposureLimit,
-    moc,
     wallet,
+    underwriterFactory,
+    underwriter,
     extraArgs,
     extraConstructorArgs,
   });
@@ -91,7 +59,7 @@ async function addRiskModule(
 
 async function createEToken(
   pool,
-  { etkName, etkSymbol, maxUtilizationRate, poolLoanInterestRate, extraArgs, extraConstructorArgs }
+  { etkName, etkSymbol, maxUtilizationRate, internalLoanInterestRate, extraArgs, extraConstructorArgs }
 ) {
   const EToken = await ethers.getContractFactory("@ensuro/core/EToken");
   const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
@@ -106,7 +74,7 @@ async function createEToken(
       etkName === undefined ? "EToken" : etkName,
       etkSymbol === undefined ? "eUSD1YEAR" : etkSymbol,
       _W(maxUtilizationRate) || _W(1),
-      _W(poolLoanInterestRate) || _W("0.05"),
+      _W(internalLoanInterestRate) || _W("0.05"),
       ...extraArgs,
     ]
   );
@@ -116,13 +84,13 @@ async function createEToken(
 
 async function addEToken(
   pool,
-  { etkName, etkSymbol, maxUtilizationRate, poolLoanInterestRate, extraArgs, extraConstructorArgs }
+  { etkName, etkSymbol, maxUtilizationRate, internalLoanInterestRate, extraArgs, extraConstructorArgs }
 ) {
   const etk = await createEToken(pool, {
     etkName,
     etkSymbol,
     maxUtilizationRate,
-    poolLoanInterestRate,
+    internalLoanInterestRate,
     extraArgs,
     extraConstructorArgs,
   });
@@ -133,39 +101,23 @@ async function addEToken(
 const randomAddress = "0x89cDb70Fee571251a66E34caa1673cE40f7549Dc";
 
 /**
- * Deploys the PolicyPool contract and AccessManager
- *
- * By default deployes de PolicyPool and AccessManager and grants LEVEL 1, 2, 3 permissions
+ * Deploys the PolicyPool contract
  *
  * options:
  * - .currency: mandatory, the address of the currency used in the PolicyPool
- * - .access: if specified, doesn't create an AccessManager, uses this address.toLowerCase
  * - .nftName: default "Policy NFT"
  * - .nftSymbol: default "EPOL"
  * - .treasuryAddress: default randomAddress
- * - .grantRoles: default []. List of additional roles to grant
- * - .dontGrantL123Roles: if specified, doesn't grants LEVEL1, 2 and 3 roles.
  */
 async function deployPool(options) {
   const PolicyPool = await ethers.getContractFactory("@ensuro/core/PolicyPool");
-  const AccessManager = await ethers.getContractFactory("@ensuro/core/AccessManager");
   const ERC1967Proxy = await ethers.getContractFactory("ERC1967Proxy");
 
-  let accessManager;
-
-  if (options.access === undefined) {
-    // Deploy AccessManager
-    accessManager = await deployProxy(ERC1967Proxy, AccessManager, [], []);
-  } else {
-    accessManager = await ethers.getContractAt("AccessManager", options.access);
-  }
-
   const currencyAddr = await ethers.resolveAddress(options.currency);
-  const amAddr = await ethers.resolveAddress(accessManager);
   const policyPool = await deployProxy(
     ERC1967Proxy,
     PolicyPool,
-    [amAddr, currencyAddr],
+    [currencyAddr],
     [
       options.nftName === undefined ? "Policy NFT" : options.nftName,
       options.nftSymbol === undefined ? "EPOL" : options.nftSymbol,
@@ -174,15 +126,6 @@ async function deployPool(options) {
   );
 
   await policyPool.waitForDeployment();
-
-  for (const role of options.grantRoles || []) {
-    await grantRole(hre, accessManager, role);
-  }
-
-  if (options.dontGrantL123Roles === undefined) {
-    await grantRole(hre, accessManager, "LEVEL1_ROLE");
-    await grantRole(hre, accessManager, "LEVEL2_ROLE");
-  }
 
   return policyPool;
 }

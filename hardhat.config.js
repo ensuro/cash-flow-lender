@@ -51,18 +51,10 @@ module.exports = {
     packages: [
       {
         package: "@ensuro/core",
-        version: "2.9.1",
+        version: "3.0.0",
         type: "npm",
         artifactsConfig: {
           onlyFQ: "package",
-        },
-      },
-      {
-        package: "@ensuro/core",
-        version: "2.9.3",
-        type: "npm",
-        artifactsConfig: {
-          onlyFQ: "full",
         },
       },
     ],
