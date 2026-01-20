@@ -16,6 +16,12 @@ const { initCurrency } = require("@ensuro/utils/js/test-utils");
 const { DAY, WEEK } = require("@ensuro/utils/js/constants");
 const { deployPool, deployPremiumsAccount, addRiskModule, addEToken } = require("../js/binary-ensuro-test-utils");
 const { packAccountGasLimits } = require("@ensuro/account-abstraction/js/userOp.js");
+const {
+  makeFTUWInputData,
+  makeFTUWReplacementInputData,
+  defaultTestParams,
+  getPremium,
+} = require("@ensuro/core/js/utils");
 
 const hre = require("hardhat");
 const helpers = require("@nomicfoundation/hardhat-network-helpers");
@@ -278,45 +284,11 @@ const directTrustfullRM = {
     // eslint-disable-next-line no-plusplus
     const internalId = policyParams.internalId || ++uniqueInternalId;
     const start = policyParams.start || (await helpers.time.latest());
-    const defaultParams = {
-      moc: _W(1),
-      jrCollRatio: _W(0),
-      collRatio: _W(1),
-      ensuroPpFee: _W(0),
-      ensuroCocFee: _W(0),
-      jrRoc: _W(0),
-      srRoc: _W(0),
-    };
-    const params = { ...defaultParams, ...(policyParams.params || {}) };
+    const params = defaultTestParams(policyParams.params || {});
     const chargedPremium =
       premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, start, expiration, params) : premium;
     const method = "newPolicy";
-    const inputData = ethers.AbiCoder.defaultAbiCoder().encode(
-      [
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint40",
-        "uint96",
-        "tuple(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
-      ],
-      [
-        payout,
-        premium,
-        lossProb,
-        expiration,
-        internalId,
-        [
-          params.moc,
-          params.jrCollRatio,
-          params.collRatio,
-          params.ensuroPpFee,
-          params.ensuroCocFee,
-          params.jrRoc,
-          params.srRoc,
-        ],
-      ]
-    );
+    const inputData = makeFTUWInputData({ payout, premium, lossProb, expiration, internalId, params });
     const newPolicyCall = rm.interface.encodeFunctionData(method, [inputData, getAddress(onBehalfOf || cfl)]);
     return { newPolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
   },
@@ -333,67 +305,35 @@ const directTrustfullRM = {
     // eslint-disable-next-line no-plusplus
     const internalId = policyParams.internalId || ++uniqueInternalId;
     const start = oldPolicy.start || (await helpers.time.latest());
-    const defaultParams = {
-      moc: _W(1),
-      jrCollRatio: _W(0),
-      collRatio: _W(1),
-      ensuroPpFee: _W(0),
-      ensuroCocFee: _W(0),
-      jrRoc: _W(0),
-      srRoc: _W(0),
-    };
-    const params = { ...defaultParams, ...(policyParams.params || {}) };
-    const oldPolicyPremium =
-      oldPolicy.purePremium +
-      oldPolicy.ensuroCommission +
-      oldPolicy.partnerCommission +
-      oldPolicy.jrCoc +
-      oldPolicy.srCoc;
+    const params = defaultTestParams(policyParams.params || {});
+    const oldPolicyPremium = getPremium(oldPolicy);
     const chargedPremium =
       (premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, start, expiration, params) : premium) -
       oldPolicyPremium;
     const method = "replacePolicy";
-    const inputData = ethers.AbiCoder.defaultAbiCoder().encode(
-      [
-        "tuple(uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint256,uint40,uint40)",
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint40",
-        "uint96",
-        "tuple(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
-      ],
-      [
-        [
-          oldPolicy.id,
-          oldPolicy.payout,
-          oldPolicy.jrScr,
-          oldPolicy.srScr,
-          oldPolicy.lossProb,
-          oldPolicy.purePremium,
-          oldPolicy.ensuroCommission,
-          oldPolicy.partnerCommission,
-          oldPolicy.jrCoc,
-          oldPolicy.srCoc,
-          oldPolicy.start,
-          oldPolicy.expiration,
-        ],
-        payout,
-        premium,
-        lossProb,
-        expiration,
-        internalId,
-        [
-          params.moc,
-          params.jrCollRatio,
-          params.collRatio,
-          params.ensuroPpFee,
-          params.ensuroCocFee,
-          params.jrRoc,
-          params.srRoc,
-        ],
-      ]
-    );
+    const oldPolicyTuple = [
+      oldPolicy.id,
+      oldPolicy.payout,
+      oldPolicy.jrScr,
+      oldPolicy.srScr,
+      oldPolicy.lossProb,
+      oldPolicy.purePremium,
+      oldPolicy.ensuroCommission,
+      oldPolicy.partnerCommission,
+      oldPolicy.jrCoc,
+      oldPolicy.srCoc,
+      oldPolicy.start,
+      oldPolicy.expiration,
+    ];
+    const inputData = makeFTUWReplacementInputData({
+      oldPolicy: oldPolicyTuple,
+      payout,
+      premium,
+      lossProb,
+      expiration,
+      internalId,
+      params,
+    });
     const replacePolicyCall = rm.interface.encodeFunctionData(method, [inputData]);
     return { replacePolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
   },
@@ -574,37 +514,12 @@ const aaFullRM = {
       jrRoc: _W("0.4"),
       srRoc: _W("0.1"),
     };
-    const params = { ...defaultParams, ...(policyParams.params || {}) };
+    const params = defaultTestParams({ ...defaultParams, ...(policyParams.params || {}) });
     const chargedPremium =
       premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, start, expiration, params) : premium;
     const method = "newPolicy";
 
-    const payload = ethers.AbiCoder.defaultAbiCoder().encode(
-      [
-        "uint256",
-        "uint256",
-        "uint256",
-        "uint40",
-        "uint96",
-        "tuple(uint256,uint256,uint256,uint256,uint256,uint256,uint256)",
-      ],
-      [
-        payout,
-        premium,
-        lossProb,
-        expiration,
-        internalId,
-        [
-          params.moc,
-          params.jrCollRatio,
-          params.collRatio,
-          params.ensuroPpFee,
-          params.ensuroCocFee,
-          params.jrRoc,
-          params.srRoc,
-        ],
-      ]
-    );
+    const payload = makeFTUWInputData({ payout, premium, lossProb, expiration, internalId, params });
 
     const signature = await fullSigner.signMessage(payload);
 
@@ -746,12 +661,7 @@ variants.forEach((variant) => {
         .to.emit(pool, "NewPolicy")
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
-      const calculatedPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const calculatedPremium = getPremium(newPolicy);
       expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
@@ -789,12 +699,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
 
-      const calculatedPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const calculatedPremium = getPremium(newPolicy);
       expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
@@ -1069,12 +974,7 @@ variants.forEach((variant) => {
       );
 
       const availableCash = await currency.balanceOf(cfl);
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(availableCash).to.equal(_A(1000) - policyPremium);
 
       expect(await cfl.maxWithdraw(lp)).to.equal(availableCash);
@@ -1111,12 +1011,7 @@ variants.forEach((variant) => {
 
       expect(captureAny.lastUint).to.equal(_A(150)); // From 100 that already had in cash to 250
 
-      const policyPremium2 =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium2 = getPremium(newPolicy);
       expect(await currency.balanceOf(cfl)).to.equal(_A(250) - policyPremium2);
 
       // Then if I create another policy it will try to withdraw more, but since only 50 left in the yieldVault
@@ -1162,12 +1057,7 @@ variants.forEach((variant) => {
       const newPolicy = captureAny.lastValue;
 
       await cfl.connect(lp).withdraw(_A(600), lp, lp);
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(await cfl.maxWithdraw(lp)).to.equal(_A(400) - policyPremium);
 
       expect(await yieldVault.totalAssets()).to.be.equal(_A(400) - policyPremium);
@@ -1248,12 +1138,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
 
       const newPolicy = captureAny.lastValue;
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(policyPremium).to.closeTo(chargedPremium, _A(0.1));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
@@ -1319,7 +1204,7 @@ variants.forEach((variant) => {
         .withArgs(rm, slotSize, slotIndex, capValue.uint, capDebtAfter.uint, capTotalDebt.uint);
       const totalPremium = capPolicies.reduce((acc, curr) => {
         const p = curr.lastValue;
-        return acc + (p.purePremium + p.ensuroCommission + p.partnerCommission + p.jrCoc + p.srCoc);
+        return acc + getPremium(p);
       }, 0n);
       expect(totalPremium).to.equal(capValue.lastUint);
       expect(totalPremium).to.equal(capDebtAfter.lastUint);
@@ -1396,11 +1281,7 @@ variants.forEach((variant) => {
       const receipt = await (await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls)).wait();
       const newPolicyEvents = getTransactionEvent(pool.interface, receipt, "NewPolicy", false, getAddress(pool));
       const newPolicies = newPolicyEvents.map((evt) => evt.args.policy);
-      const totalPremium = newPolicies.reduce(
-        (acc, curr) =>
-          acc + (curr.purePremium + curr.ensuroCommission + curr.partnerCommission + curr.jrCoc + curr.srCoc),
-        0n
-      );
+      const totalPremium = newPolicies.reduce((acc, curr) => acc + getPremium(curr), 0n);
       expect(totalPremium).to.closeTo(totalChargedPremium, _A("0.01"));
 
       // Check the policies are owned by anon
@@ -1459,11 +1340,7 @@ variants.forEach((variant) => {
       const receipt = await (await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls)).wait();
       const newPolicyEvents = getTransactionEvent(pool.interface, receipt, "NewPolicy", false, getAddress(pool));
       const newPolicies = newPolicyEvents.map((evt) => evt.args.policy);
-      const totalPremium = newPolicies.reduce(
-        (acc, curr) =>
-          acc + (curr.purePremium + curr.ensuroCommission + curr.partnerCommission + curr.jrCoc + curr.srCoc),
-        0n
-      );
+      const totalPremium = newPolicies.reduce((acc, curr) => acc + getPremium(curr), 0n);
       expect(totalPremium).to.closeTo(totalChargedPremium, _A("0.01"));
 
       // Check the policies are owned by anon
@@ -1528,12 +1405,7 @@ variants.forEach((variant) => {
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
       const finalDebt = await cfl.currentDebt();
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(finalDebt).to.be.equal(policyPremium - payout);
     });
 
@@ -1716,12 +1588,7 @@ variants.forEach((variant) => {
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
       const finalDebt = await cfl.currentDebt();
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(finalDebt).to.equal(policyPremium - payout);
     });
 
@@ -1756,12 +1623,7 @@ variants.forEach((variant) => {
         .to.not.emit(cfl, "DebtChanged");
 
       const finalDebt = await cfl.currentDebt();
-      const policyPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const policyPremium = getPremium(newPolicy);
       expect(finalDebt).to.be.equal(policyPremium);
     });
 
@@ -1788,12 +1650,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
 
-      const calculatedPremium =
-        newPolicy.purePremium +
-        newPolicy.ensuroCommission +
-        newPolicy.partnerCommission +
-        newPolicy.jrCoc +
-        newPolicy.srCoc;
+      const calculatedPremium = getPremium(newPolicy);
       expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
@@ -1879,18 +1736,8 @@ variants.forEach((variant) => {
         .withArgs(rm, TargetStatus.suspended);
 
       const finalDebt = await cfl.currentDebt();
-      const policyPremium1 =
-        newPolicy1.purePremium +
-        newPolicy1.ensuroCommission +
-        newPolicy1.partnerCommission +
-        newPolicy1.jrCoc +
-        newPolicy1.srCoc;
-      const policyPremium2 =
-        newPolicy2.purePremium +
-        newPolicy2.ensuroCommission +
-        newPolicy2.partnerCommission +
-        newPolicy2.jrCoc +
-        newPolicy2.srCoc;
+      const policyPremium1 = getPremium(newPolicy1);
+      const policyPremium2 = getPremium(newPolicy2);
       expect(finalDebt).to.be.equal(policyPremium1 + policyPremium2 - payout);
     });
 

@@ -468,13 +468,27 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   /// @inheritdoc IPolicyHolder
   function onPolicyCancelled(
+    address operator,
     address,
-    address,
     uint256,
-    uint256,
-    uint256,
-    uint256
-  ) external view override onlyPolicyPool returns (bytes4) {
+    uint256 purePremiumRefund,
+    uint256 jrCocRefund,
+    uint256 srCocRefund
+  ) external override onlyPolicyPool returns (bytes4) {
+    // In the PolicyPool the `operator` == _msgSender() for the cancel call is the Risk Module, so, it's the same
+    // target we called on newPolicy.
+    TargetConfig storage targetConfig = _getTargetConfig(operator);
+    require(
+      targetConfig.status == TargetStatus.active || targetConfig.status == TargetStatus.deprecated,
+      TargetNotActive(operator, targetConfig.status)
+    );
+    uint256 totalRefund = purePremiumRefund + jrCocRefund + srCocRefund;
+    _changeDebt(
+      operator,
+      targetConfig.slotSize,
+      _makeSlotIndex(targetConfig.slotSize, block.timestamp),
+      -totalRefund.toInt256()
+    );
     return IPolicyHolder.onPolicyCancelled.selector;
   }
 
