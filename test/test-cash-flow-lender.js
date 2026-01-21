@@ -19,6 +19,7 @@ const { packAccountGasLimits } = require("@ensuro/account-abstraction/js/userOp.
 const {
   makeFTUWInputData,
   makeFTUWReplacementInputData,
+  makeFTUWCancelInputData,
   defaultTestParams,
   getPremium,
 } = require("@ensuro/core/js/utils");
@@ -135,6 +136,7 @@ async function setupCFLRoles({ acMgr, admin, cfl, cflAdmin, lp, lp2, smartAccoun
     "onPayoutReceived",
     "onPolicyExpired",
     "onPolicyReplaced",
+    "onPolicyCancelled",
   ]);
   await acMgr.connect(admin).grantRole(roles.POOL, pool, 0);
 
@@ -1098,6 +1100,10 @@ variants.forEach((variant) => {
         cfl,
         "OnlyPolicyPool"
       );
+
+      await expect(
+        cfl.connect(cflAdmin).onPolicyCancelled(rm, ZeroAddress, 1, _A(10), _A(5), _A(2))
+      ).to.be.revertedWithCustomError(cfl, "OnlyPolicyPool");
     });
 
     it("Can forward a single new policy using batch method", async () => {
@@ -2125,37 +2131,62 @@ variants.forEach((variant) => {
       );
     });
 
-    it("PolicyPool upgrade cannot change currency", async () => {
+    it("Can forward a cancel policy", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
-      const { cfl, rm, cflAdmin, admin, lp2, currency, pool } = ret;
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
-      // First add some funds and create some policies
-      await vaultDeposit(cfl, lp2, _A(100), currency);
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
-      const premium = _A(70);
-      await (await forwardPolicies(variant, ret, [{ premium }])).getPolicies();
+      await vaultDeposit(cfl, lp2, _A(100), currency);
 
-      const otherCurrency = await initCurrency(
-        { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000), extraArgs: [admin] },
-        [lp2],
-        [_A(INITIAL)]
+      // Create a policy first to have initial debt
+      const { getPolicies } = await forwardPolicies(variant, ret, 1);
+      const [newPolicy] = await getPolicies();
+
+      const policyPremium = getPremium(newPolicy);
+      const initialDebt = await cfl.currentDebt();
+      expect(initialDebt).to.equal(policyPremium);
+
+      const purePremiumRefund = newPolicy.purePremium;
+      const jrCocRefund = newPolicy.jrCoc;
+      const srCocRefund = newPolicy.srCoc;
+      const totalRefund = purePremiumRefund + jrCocRefund + srCocRefund;
+
+      const cancelInputData = makeFTUWCancelInputData({
+        policyToCancel: newPolicy,
+        purePremiumRefund,
+        jrCocRefund,
+        srCocRefund,
+      });
+      const cancelCall = rm.interface.encodeFunctionData("cancelPolicy", [cancelInputData]);
+      const cancelSelector = rm.interface.getFunction("cancelPolicy").selector;
+      const cancelFakeSelector = await cfl.makeFakeSelector(rm, cancelSelector);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm, cancelCall),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, cancelFakeSelector]
       );
-      const PolicyPoolV3 = await ethers.getContractFactory("@ensuro/core/PolicyPool");
 
-      const poolUpgrade1Impl = await PolicyPoolV3.deploy(currency);
-      await poolUpgrade1Impl.waitForDeployment();
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [cancelFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-      const poolUpgrade2Impl = await PolicyPoolV3.deploy(otherCurrency);
-      await poolUpgrade2Impl.waitForDeployment();
+      const slotSize = await cfl.SLOTSIZE_CALENDAR_MONTH();
+      const now = new Date();
+      const year = now.getUTCFullYear();
+      const month = now.getUTCMonth() + 1;
+      const slotIndex = year * 100 + month;
 
-      await expect(
-        pool.upgradeToAndCall(await ethers.resolveAddress(poolUpgrade2Impl), ethers.toUtf8Bytes(""))
-      ).to.be.revertedWithCustomError(pool, "UpgradeCannotChangeCurrency");
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, cancelCall))
+        .to.emit(pool, "PolicyCancelled")
+        .withArgs(rm, newPolicy.id, captureAny.value, captureAny.value, captureAny.value)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, slotSize, slotIndex, -totalRefund, initialDebt - totalRefund, initialDebt - totalRefund);
 
-      await expect(pool.upgradeToAndCall(await ethers.resolveAddress(poolUpgrade1Impl), ethers.toUtf8Bytes(""))).not.to
-        .be.reverted;
-
-      await expect(cfl.connect(cflAdmin).refreshAsset()).to.be.revertedWithCustomError(cfl, "NothingToRefresh");
+      const finalDebt = await cfl.currentDebt();
+      expect(finalDebt).to.equal(initialDebt - totalRefund);
+      expect(finalDebt).to.equal(newPolicy.ensuroCommission + newPolicy.partnerCommission);
     });
 
     it("Can upgrade the CFL ", async () => {

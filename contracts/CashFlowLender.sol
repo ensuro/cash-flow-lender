@@ -158,7 +158,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   );
   event TargetStatusChanged(address indexed target, TargetStatus oldStatus, TargetStatus newStatus);
   event TargetSlotSizeChanged(address indexed target, uint32 oldSlotSize, uint32 newSlotSize);
-  event AssetChanged(address oldAsset, address newAsset);
 
   error InvalidPolicyPool();
   error OnlyPolicyPool(address sender);
@@ -175,9 +174,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error CashOutExceedsLimit(uint256 amount, int256 debtAfter);
   error RepaymentExceedsLimit(uint256 amount, int256 debtAfter);
   error CannotDeinvestYieldVault();
-  error NothingToRefresh();
-  error CannotRefreshAssetWithCash();
-  error MustChangeYieldAssetBeforeRefresh();
 
   modifier onlyPolicyPool() {
     // I intentionally use msg.sender instead of _msgSender() because I know the PolicyPool won't call
@@ -398,30 +394,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address newImpl) internal view override {}
-
-  /**
-   * @dev Refreshes the asset of the vault, when the currency() of the PolicyPool changes
-   *
-   * Requires _balance() = 0 and yieldVault.asset() = _policyPool.currency()
-   *
-   * Emits a {TargetStatusChanged} event
-   */
-  function refreshAsset() external {
-    address oldAsset = asset();
-    address newAsset = address(_policyPool.currency());
-    require(oldAsset != newAsset, NothingToRefresh());
-    require(_balance() == 0, CannotRefreshAssetWithCash());
-    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-    require($._yieldVault.asset() == newAsset, MustChangeYieldAssetBeforeRefresh());
-    ERC4626Storage storage $ERC4626 = _getERC4626StorageCFL();
-    $ERC4626._asset = IERC20(newAsset);
-    // Revokes old asset approvals and approves spending of the new assets
-    IERC20Metadata(oldAsset).approve(address($._yieldVault), 0);
-    IERC20Metadata(newAsset).approve(address($._yieldVault), type(uint256).max);
-    IERC20Metadata(oldAsset).approve(address(_policyPool), 0);
-    IERC20Metadata(newAsset).approve(address(_policyPool), type(uint256).max);
-    emit AssetChanged(oldAsset, newAsset);
-  }
 
   /// @inheritdoc IERC721Receiver
   function onERC721Received(
