@@ -5,7 +5,6 @@ const {
   makeAllViewsPublic,
   setupAMSuperAdminRole,
   setupAMRole,
-  getRole,
   _W,
   getAddress,
   captureAny,
@@ -64,7 +63,7 @@ const roles = {
 async function setUp() {
   const [, lp, lp2, anon, admin, cflAdmin, bridge23, bo] = await ethers.getSigners();
   const currency = await initCurrency(
-    { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000), extraArgs: [admin] },
+    { name: "Test USDC", symbol: "USDC", decimals: 6, initial_supply: _A(50000) },
     [lp, lp2, bo],
     [_A(INITIAL), _A(INITIAL), _A(INITIAL)]
   );
@@ -916,7 +915,7 @@ variants.forEach((variant) => {
 
     it("should consider yieldVault.maxWithdraw for CFL's maxWithdraw", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
-      const { cfl, currency, yieldVault, lp, cflAdmin, admin } = ret;
+      const { cfl, currency, yieldVault, lp, cflAdmin } = ret;
 
       await vaultDeposit(cfl, lp, _A(1000), currency);
 
@@ -937,7 +936,6 @@ variants.forEach((variant) => {
       expect(await cfl.maxWithdraw(lp)).to.equal(_A(700));
       expect(await cfl.maxRedeem(lp)).to.equal(_A(700)); // 1:1 assets:shares
 
-      await currency.connect(admin).grantRole(getRole("MINTER_ROLE"), yieldVault);
       await yieldVault.discreteEarning(_A(250));
 
       // Still the same because yieldVault.maxWithdraw didn't changed

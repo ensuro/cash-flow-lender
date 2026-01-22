@@ -38,7 +38,6 @@ module.exports = {
   dependencyCompiler: {
     paths: [
       "@ensuro/utils/contracts/TestCurrency.sol",
-      "@ensuro/utils/contracts/TestCurrencyAC.sol",
       "@ensuro/utils/contracts/TestERC4626.sol",
       "@ensuro/account-abstraction/contracts/ERC2771ForwarderAccount.sol",
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
