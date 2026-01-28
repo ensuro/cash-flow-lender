@@ -18,7 +18,6 @@ const {
   deployPremiumsAccount,
   addRiskModule,
   addEToken,
-  createRiskModule,
   makeAllPublic,
 } = require("@ensuro/core/js/test-utils");
 const { deployAMPProxy, getAccessManager, attachAsAMP } = require("@ensuro/access-managed-proxy/js/deployProxy");
@@ -424,13 +423,12 @@ const aaFullRM = {
     const FullSignedUW = await ethers.getContractFactory("FullSignedUW");
     const fullSignedUW = await FullSignedUW.deploy();
     await fullSignedUW.waitForDeployment();
-    const rm = await createRiskModule(pool, premiumsAccount, {
+    const rm = await addRiskModule(pool, premiumsAccount, {
       underwriter: fullSignedUW,
       disableAC: false,
+      exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
     });
     await setupFullSignedUWRoles({ rmProxy: rm, rmImpl: rm, acMgr, admin, cfl, fullSigner });
-    await pool.addComponent(rm, 2);
-    await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
 
     return {
       fullSigner,
@@ -486,13 +484,12 @@ const directFullRM = {
     const FullSignedUW = await ethers.getContractFactory("FullSignedUW");
     const fullSignedUW = await FullSignedUW.deploy();
     await fullSignedUW.waitForDeployment();
-    const rm = await createRiskModule(pool, premiumsAccount, {
+    const rm = await addRiskModule(pool, premiumsAccount, {
       underwriter: fullSignedUW,
       disableAC: false,
+      exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
     });
     await setupFullSignedUWRoles({ rmProxy: rm, rmImpl: rm, acMgr, admin, cfl, fullSigner });
-    await pool.addComponent(rm, 2);
-    await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
 
     return {
       fullSigner,
