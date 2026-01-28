@@ -1,7 +1,8 @@
 const hre = require("hardhat");
 const { ethers } = hre;
-const { _W } = require("@ensuro/utils/js/utils");
+const { _W, AM_ROLES } = require("@ensuro/utils/js/utils");
 const { deployProxy } = require("@ensuro/utils/js/test-utils");
+const { attachAsAMP } = require("@ensuro/access-managed-proxy/js/deployProxy");
 
 const { ZeroAddress } = ethers;
 
@@ -143,6 +144,27 @@ async function deployPremiumsAccount(pool, options, addToPool = true) {
   return premiumsAccount;
 }
 
+async function makeAllPublic(contract, accessManager) {
+  const skipSelectors = await (await attachAsAMP(contract)).PASS_THRU_METHODS();
+  const selectors = contract.interface.fragments
+    .filter((fragment) => fragment.type === "function" && skipSelectors.indexOf(fragment.selector) < 0)
+    .map((fragment) => fragment.selector);
+  await accessManager.setTargetFunctionRole(contract, selectors, AM_ROLES.PUBLIC_ROLE);
+}
+
+async function makeCFLForwardingPublic(cfl, rm, accessManager) {
+  const rmSelectors = ["newPolicy", "newPolicyFull", "resolvePolicy", "replacePolicy", "cancelPolicy"]
+    .map((method) => rm.interface.getFunction(method)?.selector)
+    .filter((selector) => selector !== undefined);
+
+  const ownPolicySelector = await cfl.OWN_POLICY_SELECTOR();
+  rmSelectors.push(ownPolicySelector);
+
+  const fakeSelectors = await Promise.all(rmSelectors.map((selector) => cfl.makeFakeSelector(rm, selector)));
+
+  await accessManager.setTargetFunctionRole(cfl, fakeSelectors, AM_ROLES.PUBLIC_ROLE);
+}
+
 module.exports = {
   addEToken,
   addRiskModule,
@@ -151,4 +173,6 @@ module.exports = {
   deployPool,
   deployProxy,
   deployPremiumsAccount,
+  makeAllPublic,
+  makeCFLForwardingPublic,
 };

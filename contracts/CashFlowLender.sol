@@ -19,7 +19,8 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IPolicyPool} from "./dependencies/IPolicyPool.sol";
 import {IPolicyHolder} from "@ensuro/core/contracts/interfaces/IPolicyHolder.sol";
-import {AccessManagedProxy} from "./dependencies/AccessManagedProxy.sol";
+import {AccessManagedProxy} from "@ensuro/access-managed-proxy/contracts/AccessManagedProxy.sol";
+import {AMPUtils} from "@ensuro/access-managed-proxy/contracts/AMPUtils.sol";
 
 /**
  * @title CashFlow Lender Module that tracks ownership
@@ -571,7 +572,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @param selector The 4-bytes method selector of the method to be called in the target
    */
   function makeFakeSelector(address target, bytes4 selector) public pure returns (bytes4) {
-    return Packing.extract_32_4(keccak256(abi.encodePacked(target, selector)), 0);
+    return AMPUtils.makeSelector(abi.encodePacked(target, selector));
   }
 
   function _checkCanForward(address caller, address target, bytes4 selector) internal view {
