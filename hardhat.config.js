@@ -5,11 +5,8 @@ require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-exposed");
 
 const hretry = require("@ensuro/utils/js/hardhat-retry");
-const verifiableBinaries = require("@ensuro/utils/js/verifiableBinaries");
 
 hretry.installWrapper();
-verifiableBinaries.wrapEthersFunctions();
-verifiableBinaries.addTasks();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
@@ -43,19 +40,12 @@ module.exports = {
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
       "@account-abstraction/contracts/core/EntryPoint.sol",
       "@ensuro/core/contracts/interfaces/IPolicyHolder.sol",
-    ],
-  },
-  verifiableBinaries: {
-    path: "./verifiable-binaries",
-    packages: [
-      {
-        package: "@ensuro/core",
-        version: "3.0.0",
-        type: "npm",
-        artifactsConfig: {
-          onlyFQ: "package",
-        },
-      },
+      "@ensuro/core/contracts/PolicyPool.sol",
+      "@ensuro/core/contracts/EToken.sol",
+      "@ensuro/core/contracts/PremiumsAccount.sol",
+      "@ensuro/core/contracts/RiskModule.sol",
+      "@ensuro/core/contracts/underwriters/FullTrustedUW.sol",
+      "@ensuro/core/contracts/underwriters/FullSignedUW.sol",
     ],
   },
 };
