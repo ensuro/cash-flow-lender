@@ -2,7 +2,6 @@ const { expect } = require("chai");
 const {
   amountFunction,
   tagitVariant,
-  setupAMSuperAdminRole,
   setupAMRole,
   _W,
   getAddress,
@@ -57,12 +56,7 @@ const OverrideOption = {
 };
 
 const roles = {
-  LP_ROLE: 1,
-  SMART_ACCOUNT: 2, // Calls to forward... methods, used in operations
   USER_OP_SIGNER: 3, // Permissions that will be granted to the userOp signer (_msgSender() when using 2771)
-  BACK_OFFICE: 4, // Permissions that will be granted to who reflects in the CFL the payments made to/from the
-  // the partners (usually in fiat)
-  POOL: 5, // Permissions for the onXXX methods that are called from the PolicyPool
 };
 
 async function setUp() {
@@ -114,62 +108,6 @@ async function setUp() {
   };
 }
 
-async function setupCFLRoles({ acMgr, admin, cfl, cflAdmin, lp, lp2, smartAccount, pool, bo }) {
-  await makeAllPublic(cfl, acMgr.connect(admin));
-
-  const ADMIN_ROLE = await setupAMSuperAdminRole(acMgr.connect(admin), cfl);
-  await acMgr.connect(admin).grantRole(ADMIN_ROLE, cflAdmin, 0);
-
-  await setupAMRole(acMgr.connect(admin), cfl, roles, "LP_ROLE", ["withdraw", "deposit", "mint", "redeem", "transfer"]);
-  await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp, 0);
-  await acMgr.connect(admin).grantRole(roles.LP_ROLE, lp2, 0);
-
-  await setupAMRole(acMgr.connect(admin), cfl, roles, "SMART_ACCOUNT", [
-    "forwardNewPolicy",
-    "forwardNewPolicyBatch",
-    "forwardResolvePolicy",
-    "forwardResolvePolicyBatch",
-  ]);
-  await acMgr.connect(admin).grantRole(roles.SMART_ACCOUNT, smartAccount, 0);
-
-  await setupAMRole(acMgr.connect(admin), cfl, roles, "POOL", [
-    "onERC721Received",
-    "onPayoutReceived",
-    "onPolicyExpired",
-    "onPolicyReplaced",
-    "onPolicyCancelled",
-  ]);
-  await acMgr.connect(admin).grantRole(roles.POOL, pool, 0);
-
-  await setupAMRole(acMgr.connect(admin), cfl, roles, "BACK_OFFICE", ["repayDebt", "cashOutPayouts"]);
-  await acMgr.connect(admin).grantRole(roles.BACK_OFFICE, bo, 0);
-  return ADMIN_ROLE;
-}
-
-async function setupFullSignedUWRoles({ rmProxy, rmImpl, acMgr, admin, cfl, fullSigner }) {
-  const rmProxyAddr = await ethers.resolveAddress(rmProxy);
-  const newPolicySelector = rmImpl.interface.getFunction("newPolicy").selector;
-  const resolvePolicySelector = rmImpl.interface.getFunction("resolvePolicy").selector;
-  const replacePolicySelector = rmImpl.interface.getFunction("replacePolicy").selector;
-
-  await makeAllPublic(rmProxy, acMgr.connect(admin));
-
-  const CFL_RM_ROLE = 100;
-  await acMgr.connect(admin).labelRole(CFL_RM_ROLE, "CFL_RM_ROLE");
-  await acMgr
-    .connect(admin)
-    .setTargetFunctionRole(rmProxyAddr, [newPolicySelector, resolvePolicySelector, replacePolicySelector], CFL_RM_ROLE);
-  const cflAddr = await ethers.resolveAddress(cfl);
-  await acMgr.connect(admin).grantRole(CFL_RM_ROLE, cflAddr, 0);
-
-  const FULL_PRICE_NEW_POLICY = ethers.id("FULL_PRICE_NEW_POLICY").slice(0, 10);
-  const FULL_PRICER_ROLE = 101;
-  await acMgr.connect(admin).labelRole(FULL_PRICER_ROLE, "FULL_PRICER_ROLE");
-  await acMgr.connect(admin).setTargetFunctionRole(rmProxyAddr, [FULL_PRICE_NEW_POLICY], FULL_PRICER_ROLE);
-  const fullSignerAddr = await ethers.resolveAddress(fullSigner);
-  await acMgr.connect(admin).grantRole(FULL_PRICER_ROLE, fullSignerAddr, 0);
-}
-
 async function vaultDeposit(vault, lp, amount, currency = undefined) {
   await currency.connect(lp).approve(vault, amount);
   return vault.connect(lp).deposit(amount, lp);
@@ -215,7 +153,7 @@ const directTrustfullRM = {
   name: "NoTrustedForwarder+Trustful",
   fixture: async () => {
     const ret = await setUp();
-    const { admin, CashFlowLender, yieldVault, acMgr, pool, premiumsAccount, lp, lp2, bo, cflAdmin, bridge23 } = ret;
+    const { admin, CashFlowLender, yieldVault, acMgr, pool, premiumsAccount, bridge23 } = ret;
 
     const cfl = await deployAMPProxy(CashFlowLender, [NAME, SYMB, await ethers.resolveAddress(yieldVault)], {
       kind: "uups",
@@ -223,28 +161,16 @@ const directTrustfullRM = {
       constructorArgs: [ZeroAddress, await ethers.resolveAddress(pool)],
       acMgr: acMgr,
     });
-    const ADMIN_ROLE = await setupCFLRoles({
-      acMgr,
-      admin,
-      cfl,
-      cflAdmin,
-      lp,
-      lp2,
-      smartAccount: bridge23,
-      pool,
-      bo,
-    });
+    await makeAllPublic(cfl, acMgr.connect(admin));
 
     const rm = await addRiskModule(pool, premiumsAccount, {});
     await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
 
     return {
-      ADMIN_ROLE,
       smartAccount: bridge23, // The bridge23 and the smart account are the same in this variant
       cfl,
       trustedForwarder: ZeroAddress,
       rm,
-      roles,
       ...ret,
     };
   },
@@ -324,7 +250,7 @@ const aaTrustfullRM = {
   name: "SmartAccountForwarder+Trustful",
   fixture: async () => {
     const ret = await setUp();
-    const { admin, CashFlowLender, yieldVault, acMgr, pool, premiumsAccount, lp, lp2, bo, cflAdmin, bridge23 } = ret;
+    const { admin, CashFlowLender, yieldVault, acMgr, pool, premiumsAccount, bridge23 } = ret;
 
     const EntryPoint = await ethers.getContractFactory("EntryPoint");
     const ep = await EntryPoint.deploy();
@@ -340,30 +266,17 @@ const aaTrustfullRM = {
       constructorArgs: [await ethers.resolveAddress(smartAccount), await ethers.resolveAddress(pool)],
       acMgr: acMgr,
     });
-
-    const ADMIN_ROLE = await setupCFLRoles({
-      acMgr,
-      admin,
-      cfl,
-      cflAdmin,
-      lp,
-      lp2,
-      smartAccount,
-      pool,
-      bo,
-    });
+    await makeAllPublic(cfl, acMgr.connect(admin));
 
     const rm = await addRiskModule(pool, premiumsAccount, {});
     await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
 
     return {
-      ADMIN_ROLE,
       ep,
       smartAccount,
       cfl,
       trustedForwarder: smartAccount,
       rm,
-      roles,
       ...ret,
     };
   },
@@ -417,7 +330,7 @@ const aaFullRM = {
   name: "SmartAccountForwarder+FullSignedUW",
   fixture: async () => {
     const ret = await aaTrustfullRM.fixture();
-    const { bo, cfl, acMgr, admin, pool, premiumsAccount } = ret;
+    const { bo, pool, premiumsAccount } = ret;
     const fullSigner = bo;
     const FullSignedUW = await ethers.getContractFactory("FullSignedUW");
     const fullSignedUW = await FullSignedUW.deploy();
@@ -427,7 +340,6 @@ const aaFullRM = {
       disableAC: false,
       exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
     });
-    await setupFullSignedUWRoles({ rmProxy: rm, rmImpl: rm, acMgr, admin, cfl, fullSigner });
 
     return {
       fullSigner,
@@ -478,7 +390,7 @@ const directFullRM = {
   name: "NoTrustedForwarder+FullSignedUW",
   fixture: async () => {
     const ret = await directTrustfullRM.fixture();
-    const { bo, cfl, acMgr, admin, pool, premiumsAccount } = ret;
+    const { bo, pool, premiumsAccount } = ret;
     const fullSigner = bo;
     const FullSignedUW = await ethers.getContractFactory("FullSignedUW");
     const fullSignedUW = await FullSignedUW.deploy();
@@ -488,7 +400,6 @@ const directFullRM = {
       disableAC: false,
       exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
     });
-    await setupFullSignedUWRoles({ rmProxy: rm, rmImpl: rm, acMgr, admin, cfl, fullSigner });
 
     return {
       fullSigner,
@@ -999,10 +910,7 @@ variants.forEach((variant) => {
 
     it("Should restrict onXXX methods to be callable only by the PolicyPool", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
-      const { cfl, rm, cflAdmin, acMgr, admin } = ret;
-
-      // Grant the permission, otherwise it won't be able to pass the proxy
-      await acMgr.connect(admin).grantRole(roles.POOL, cflAdmin, 0);
+      const { cfl, rm, cflAdmin } = ret;
 
       await expect(
         cfl.connect(cflAdmin).onERC721Received(rm, ZeroAddress, 1, ethers.toUtf8Bytes(""))
