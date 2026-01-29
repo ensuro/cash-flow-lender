@@ -2,7 +2,6 @@ const { expect } = require("chai");
 const {
   amountFunction,
   tagitVariant,
-  makeAllViewsPublic,
   setupAMSuperAdminRole,
   setupAMRole,
   _W,
@@ -116,7 +115,7 @@ async function setUp() {
 }
 
 async function setupCFLRoles({ acMgr, admin, cfl, cflAdmin, lp, lp2, smartAccount, pool, bo }) {
-  await makeAllViewsPublic(acMgr.connect(admin), cfl);
+  await makeAllPublic(cfl, acMgr.connect(admin));
 
   const ADMIN_ROLE = await setupAMSuperAdminRole(acMgr.connect(admin), cfl);
   await acMgr.connect(admin).grantRole(ADMIN_ROLE, cflAdmin, 0);
@@ -1342,7 +1341,6 @@ variants.forEach((variant) => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
 
-      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       await vaultDeposit(cfl, lp2, _A(1000), currency);
