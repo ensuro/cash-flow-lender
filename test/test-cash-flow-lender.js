@@ -41,6 +41,9 @@ const INITIAL = 10000;
 const NAME = "Cash Flow Lender";
 const SYMB = "CFL";
 
+const EXPOSURE_LIMIT_INT = 1_000_000;
+const EXPOSURE_LIMIT = _A(EXPOSURE_LIMIT_INT);
+
 const TargetStatus = {
   inactive: 0,
   active: 1,
@@ -164,7 +167,7 @@ const directTrustfullRM = {
     await makeAllPublic(cfl, acMgr.connect(admin));
 
     const rm = await addRiskModule(pool, premiumsAccount, {});
-    await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
+    await pool.connect(admin).setExposureLimit(rm, EXPOSURE_LIMIT);
 
     return {
       smartAccount: bridge23, // The bridge23 and the smart account are the same in this variant
@@ -205,10 +208,9 @@ const directTrustfullRM = {
     const internalId = policyParams.internalId || ++uniqueInternalId;
     const start = oldPolicy.start || (await helpers.time.latest());
     const params = defaultTestParams(policyParams.params || {});
-    const oldPolicyPremium = getPremium(oldPolicy);
     const chargedPremium =
       (premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, start, expiration, params) : premium) -
-      oldPolicyPremium;
+      getPremium(oldPolicy);
     const method = "replacePolicy";
     const oldPolicyTuple = [
       oldPolicy.id,
@@ -269,7 +271,7 @@ const aaTrustfullRM = {
     await makeAllPublic(cfl, acMgr.connect(admin));
 
     const rm = await addRiskModule(pool, premiumsAccount, {});
-    await pool.connect(admin).setExposureLimit(rm, 2n ** 128n - 1n);
+    await pool.connect(admin).setExposureLimit(rm, EXPOSURE_LIMIT);
 
     return {
       ep,
@@ -337,8 +339,7 @@ const aaFullRM = {
     await fullSignedUW.waitForDeployment();
     const rm = await addRiskModule(pool, premiumsAccount, {
       underwriter: fullSignedUW,
-      disableAC: false,
-      exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
+      exposureLimit: EXPOSURE_LIMIT_INT,
     });
 
     return {
@@ -397,8 +398,7 @@ const directFullRM = {
     await fullSignedUW.waitForDeployment();
     const rm = await addRiskModule(pool, premiumsAccount, {
       underwriter: fullSignedUW,
-      disableAC: false,
-      exposureLimit: "340282366920938463463374607431768", // (2^128 - 1) / 10^6, so pool._A() results in max uint128
+      exposureLimit: EXPOSURE_LIMIT_INT,
     });
 
     return {
@@ -497,8 +497,7 @@ variants.forEach((variant) => {
         .to.emit(pool, "NewPolicy")
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
-      const calculatedPremium = getPremium(newPolicy);
-      expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
     });
@@ -535,8 +534,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
 
-      const calculatedPremium = getPremium(newPolicy);
-      expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
     });
@@ -809,8 +807,7 @@ variants.forEach((variant) => {
       );
 
       const availableCash = await currency.balanceOf(cfl);
-      const policyPremium = getPremium(newPolicy);
-      expect(availableCash).to.equal(_A(1000) - policyPremium);
+      expect(availableCash).to.equal(_A(1000) - getPremium(newPolicy));
 
       expect(await cfl.maxWithdraw(lp)).to.equal(availableCash);
       await expect(cfl.connect(lp).withdraw(availableCash, lp, lp)).to.not.be.reverted;
@@ -846,8 +843,7 @@ variants.forEach((variant) => {
 
       expect(captureAny.lastUint).to.equal(_A(150)); // From 100 that already had in cash to 250
 
-      const policyPremium2 = getPremium(newPolicy);
-      expect(await currency.balanceOf(cfl)).to.equal(_A(250) - policyPremium2);
+      expect(await currency.balanceOf(cfl)).to.equal(_A(250) - getPremium(newPolicy));
 
       // Then if I create another policy it will try to withdraw more, but since only 50 left in the yieldVault
       // if will withdraw only 50 withdraw failing
@@ -974,8 +970,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
 
       const newPolicy = captureAny.lastValue;
-      const policyPremium = getPremium(newPolicy);
-      expect(policyPremium).to.closeTo(chargedPremium, _A(0.1));
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A(0.1));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
     });
@@ -1038,10 +1033,7 @@ variants.forEach((variant) => {
         .withArgs(rm, capPolicies[2].value)
         .to.emit(cfl, "DebtChanged")
         .withArgs(rm, slotSize, slotIndex, capValue.uint, capDebtAfter.uint, capTotalDebt.uint);
-      const totalPremium = capPolicies.reduce((acc, curr) => {
-        const p = curr.lastValue;
-        return acc + getPremium(p);
-      }, 0n);
+      const totalPremium = capPolicies.reduce((acc, curr) => acc + getPremium(curr.lastValue), 0n);
       expect(totalPremium).to.equal(capValue.lastUint);
       expect(totalPremium).to.equal(capDebtAfter.lastUint);
       expect(totalPremium).to.equal(capTotalDebt.lastUint);
@@ -1138,7 +1130,7 @@ variants.forEach((variant) => {
       let totalChargedPremium = _A(0);
       const inputs = [
         [ret, {}], // newPolicy onBehalfOf = cfl
-        [ret, { method: variant.rmIsFull ? "newPolicy" : "newPolicyFull" }, anon], // newPolicyFull onBehalfOf = anon
+        [ret, {}, anon], // newPolicy onBehalfOf = anon
         [ret, {}, lp2], // newPolicy onBehalfOf = lp2
       ];
 
@@ -1163,6 +1155,18 @@ variants.forEach((variant) => {
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
       await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
+      // Calling another selector, not authorized fails too
+      const batchFakeSelector2 = await cfl.makeFakeSelector(rm, "0x12345678");
+      const policyCalls2 = [policyCalls[0], "0x12345678", policyCalls[2]];
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls2),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector2]
+      );
+
+      // Owner policies also require a different permission
       await variant.expectCustomError(
         ret,
         variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls),
@@ -1240,9 +1244,7 @@ variants.forEach((variant) => {
         .to.emit(cfl, "DebtChanged")
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
-      const finalDebt = await cfl.currentDebt();
-      const policyPremium = getPremium(newPolicy);
-      expect(finalDebt).to.be.equal(policyPremium - payout);
+      expect(await cfl.currentDebt()).to.be.equal(getPremium(newPolicy) - payout);
     });
 
     it("Can create, replace and resolve multiple policies using batch methods [!?rmIsFull]", async () => {
@@ -1422,9 +1424,7 @@ variants.forEach((variant) => {
         .to.emit(cfl, "DebtChanged")
         .withArgs(rm, slotSize, slotIndex, captureAny.value, captureAny.value, captureAny.value);
 
-      const finalDebt = await cfl.currentDebt();
-      const policyPremium = getPremium(newPolicy);
-      expect(finalDebt).to.equal(policyPremium - payout);
+      expect(await cfl.currentDebt()).to.equal(getPremium(newPolicy) - payout);
     });
 
     it("Can forward a resolve policy with payout 0", async () => {
@@ -1457,9 +1457,7 @@ variants.forEach((variant) => {
         .withArgs(rm, newPolicy.id, payout)
         .to.not.emit(cfl, "DebtChanged");
 
-      const finalDebt = await cfl.currentDebt();
-      const policyPremium = getPremium(newPolicy);
-      expect(finalDebt).to.be.equal(policyPremium);
+      expect(await cfl.currentDebt()).to.be.equal(getPremium(newPolicy));
     });
 
     it("Can forward a resolve policy owned by someone else", async () => {
@@ -1485,8 +1483,7 @@ variants.forEach((variant) => {
         .withArgs(rm, captureAny.value);
       const newPolicy = captureAny.lastValue;
 
-      const calculatedPremium = getPremium(newPolicy);
-      expect(calculatedPremium).to.closeTo(chargedPremium, _A("0.0001"));
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A("0.0001"));
 
       expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
 
@@ -1571,9 +1568,7 @@ variants.forEach((variant) => {
         .withArgs(rm, TargetStatus.suspended);
 
       const finalDebt = await cfl.currentDebt();
-      const policyPremium1 = getPremium(newPolicy1);
-      const policyPremium2 = getPremium(newPolicy2);
-      expect(finalDebt).to.be.equal(policyPremium1 + policyPremium2 - payout);
+      expect(finalDebt).to.be.equal(getPremium(newPolicy1) + getPremium(newPolicy2) - payout);
     });
 
     it("It doesn't allow to create new policies if target limits exceeded", async () => {
@@ -1877,7 +1872,7 @@ variants.forEach((variant) => {
 
       const { premiumsAccount } = ret;
       const rm2 = await addRiskModule(pool, premiumsAccount, {});
-      await pool.connect(admin).setExposureLimit(rm2, 2n ** 128n - 1n);
+      await pool.connect(admin).setExposureLimit(rm2, EXPOSURE_LIMIT);
       await vaultDeposit(cfl, lp2, _A(200), currency);
 
       const premium = _A(70);
@@ -1972,9 +1967,8 @@ variants.forEach((variant) => {
       const { getPolicies } = await forwardPolicies(variant, ret, 1);
       const [newPolicy] = await getPolicies();
 
-      const policyPremium = getPremium(newPolicy);
       const initialDebt = await cfl.currentDebt();
-      expect(initialDebt).to.equal(policyPremium);
+      expect(initialDebt).to.equal(getPremium(newPolicy));
 
       const purePremiumRefund = newPolicy.purePremium;
       const jrCocRefund = newPolicy.jrCoc;
