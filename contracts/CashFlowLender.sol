@@ -19,8 +19,8 @@ import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/U
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IPolicyPool} from "./dependencies/IPolicyPool.sol";
 import {IPolicyHolder} from "@ensuro/core/contracts/interfaces/IPolicyHolder.sol";
-import {IPolicyHolderV2} from "@ensuro/core/contracts/interfaces/IPolicyHolderV2.sol";
-import {AccessManagedProxy} from "./dependencies/AccessManagedProxy.sol";
+import {AccessManagedProxy} from "@ensuro/access-managed-proxy/contracts/AccessManagedProxy.sol";
+import {AMPUtils} from "@ensuro/access-managed-proxy/contracts/AMPUtils.sol";
 
 /**
  * @title CashFlow Lender Module that tracks ownership
@@ -47,7 +47,7 @@ import {AccessManagedProxy} from "./dependencies/AccessManagedProxy.sol";
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
  */
-contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Upgradeable, IPolicyHolderV2, ERC165 {
+contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Upgradeable, IPolicyHolder, ERC165 {
   using SafeERC20 for IERC20Metadata;
   using SafeCast for uint256;
   using SafeCast for int256;
@@ -112,18 +112,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     }
   }
 
-  // keccak256(abi.encode(uint256(keccak256("openzeppelin.storage.ERC4626")) - 1)) & ~bytes32(uint256(0xff))
-  // solhint-disable-next-line const-name-snakecase
-  bytes32 internal constant ERC4626StorageLocation = 0x0773e532dfede91f04b12a73d3d2acd361424f41f76b4fb79f090161e36b4e00;
-
-  // Copied from OZ's ERC4626.sol, because the original function is private
-  function _getERC4626StorageCFL() internal pure returns (ERC4626Storage storage $) {
-    // solhint-disable-next-line no-inline-assembly
-    assembly {
-      $.slot := ERC4626StorageLocation
-    }
-  }
-
   event YieldVaultChanged(IERC4626 oldVault, IERC4626 newVault);
   event DebtChanged(
     address indexed target,
@@ -159,7 +147,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   );
   event TargetStatusChanged(address indexed target, TargetStatus oldStatus, TargetStatus newStatus);
   event TargetSlotSizeChanged(address indexed target, uint32 oldSlotSize, uint32 newSlotSize);
-  event AssetChanged(address oldAsset, address newAsset);
 
   error InvalidPolicyPool();
   error OnlyPolicyPool(address sender);
@@ -176,9 +163,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error CashOutExceedsLimit(uint256 amount, int256 debtAfter);
   error RepaymentExceedsLimit(uint256 amount, int256 debtAfter);
   error CannotDeinvestYieldVault();
-  error NothingToRefresh();
-  error CannotRefreshAssetWithCash();
-  error MustChangeYieldAssetBeforeRefresh();
 
   modifier onlyPolicyPool() {
     // I intentionally use msg.sender instead of _msgSender() because I know the PolicyPool won't call
@@ -253,7 +237,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     string memory symbol_,
     IERC4626 yieldVault_
   ) internal onlyInitializing {
-    __UUPSUpgradeable_init();
     address asset_ = address(_policyPool.currency());
     __ERC4626_init(IERC20(asset_));
     __ERC20_init(name_, symbol_);
@@ -392,7 +375,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return
       interfaceId == type(IERC721Receiver).interfaceId ||
       interfaceId == type(IPolicyHolder).interfaceId ||
-      interfaceId == type(IPolicyHolderV2).interfaceId ||
       interfaceId == type(IERC20).interfaceId ||
       interfaceId == type(IERC20Metadata).interfaceId ||
       interfaceId == type(IERC4626).interfaceId ||
@@ -401,30 +383,6 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
 
   // solhint-disable-next-line no-empty-blocks
   function _authorizeUpgrade(address newImpl) internal view override {}
-
-  /**
-   * @dev Refreshes the asset of the vault, when the currency() of the PolicyPool changes
-   *
-   * Requires _balance() = 0 and yieldVault.asset() = _policyPool.currency()
-   *
-   * Emits a {TargetStatusChanged} event
-   */
-  function refreshAsset() external {
-    address oldAsset = asset();
-    address newAsset = address(_policyPool.currency());
-    require(oldAsset != newAsset, NothingToRefresh());
-    require(_balance() == 0, CannotRefreshAssetWithCash());
-    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-    require($._yieldVault.asset() == newAsset, MustChangeYieldAssetBeforeRefresh());
-    ERC4626Storage storage $ERC4626 = _getERC4626StorageCFL();
-    $ERC4626._asset = IERC20(newAsset);
-    // Revokes old asset approvals and approves spending of the new assets
-    IERC20Metadata(oldAsset).approve(address($._yieldVault), 0);
-    IERC20Metadata(newAsset).approve(address($._yieldVault), type(uint256).max);
-    IERC20Metadata(oldAsset).approve(address(_policyPool), 0);
-    IERC20Metadata(newAsset).approve(address(_policyPool), type(uint256).max);
-    emit AssetChanged(oldAsset, newAsset);
-  }
 
   /// @inheritdoc IERC721Receiver
   function onERC721Received(
@@ -464,9 +422,35 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return IPolicyHolder.onPayoutReceived.selector;
   }
 
-  /// @inheritdoc IPolicyHolderV2
+  /// @inheritdoc IPolicyHolder
   function onPolicyReplaced(address, address, uint256, uint256) external view override onlyPolicyPool returns (bytes4) {
-    return IPolicyHolderV2.onPolicyReplaced.selector;
+    return IPolicyHolder.onPolicyReplaced.selector;
+  }
+
+  /// @inheritdoc IPolicyHolder
+  function onPolicyCancelled(
+    address operator,
+    address,
+    uint256,
+    uint256 purePremiumRefund,
+    uint256 jrCocRefund,
+    uint256 srCocRefund
+  ) external override onlyPolicyPool returns (bytes4) {
+    // In the PolicyPool the `operator` == _msgSender() for the cancel call is the Risk Module, so, it's the same
+    // target we called on newPolicy.
+    TargetConfig storage targetConfig = _getTargetConfig(operator);
+    require(
+      targetConfig.status == TargetStatus.active || targetConfig.status == TargetStatus.deprecated,
+      TargetNotActive(operator, targetConfig.status)
+    );
+    uint256 totalRefund = purePremiumRefund + jrCocRefund + srCocRefund;
+    _changeDebt(
+      operator,
+      targetConfig.slotSize,
+      _makeSlotIndex(targetConfig.slotSize, block.timestamp),
+      -totalRefund.toInt256()
+    );
+    return IPolicyHolder.onPolicyCancelled.selector;
   }
 
   // Fix Context base contract duplicates
@@ -576,7 +560,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @param selector The 4-bytes method selector of the method to be called in the target
    */
   function makeFakeSelector(address target, bytes4 selector) public pure returns (bytes4) {
-    return Packing.extract_32_4(keccak256(abi.encodePacked(target, selector)), 0);
+    return AMPUtils.makeSelector(abi.encodePacked(target, selector));
   }
 
   function _checkCanForward(address caller, address target, bytes4 selector) internal view {

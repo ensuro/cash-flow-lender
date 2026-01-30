@@ -5,22 +5,19 @@ require("@nomicfoundation/hardhat-toolbox");
 require("hardhat-exposed");
 
 const hretry = require("@ensuro/utils/js/hardhat-retry");
-const verifiableBinaries = require("@ensuro/utils/js/verifiableBinaries");
 
 hretry.installWrapper();
-verifiableBinaries.wrapEthersFunctions();
-verifiableBinaries.addTasks();
 
 /** @type import('hardhat/config').HardhatUserConfig */
 module.exports = {
   solidity: {
-    version: "0.8.28",
+    version: "0.8.30",
     settings: {
       optimizer: {
         enabled: true,
         runs: 200,
       },
-      evmVersion: "cancun",
+      evmVersion: "prague",
     },
   },
   networks: {
@@ -42,27 +39,13 @@ module.exports = {
       "@ensuro/account-abstraction/contracts/ERC2771ForwarderAccount.sol",
       "@openzeppelin/contracts/access/manager/AccessManager.sol",
       "@account-abstraction/contracts/core/EntryPoint.sol",
-    ],
-  },
-  verifiableBinaries: {
-    path: "./verifiable-binaries",
-    packages: [
-      {
-        package: "@ensuro/core",
-        version: "2.9.1",
-        type: "npm",
-        artifactsConfig: {
-          onlyFQ: "package",
-        },
-      },
-      {
-        package: "@ensuro/core",
-        version: "2.9.3",
-        type: "npm",
-        artifactsConfig: {
-          onlyFQ: "full",
-        },
-      },
+      "@ensuro/core/contracts/interfaces/IPolicyHolder.sol",
+      "@ensuro/core/contracts/PolicyPool.sol",
+      "@ensuro/core/contracts/EToken.sol",
+      "@ensuro/core/contracts/PremiumsAccount.sol",
+      "@ensuro/core/contracts/RiskModule.sol",
+      "@ensuro/core/contracts/underwriters/FullTrustedUW.sol",
+      "@ensuro/core/contracts/underwriters/FullSignedUW.sol",
     ],
   },
 };

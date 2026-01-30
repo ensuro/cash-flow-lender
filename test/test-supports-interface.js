@@ -17,8 +17,7 @@ describe("Supports interface implementation", function () {
       IERC20: "0x36372b07",
       IERC20Metadata: "0xa219a025",
       IERC721: "0x80ac58cd",
-      IPolicyHolder: "0x3ece0a89",
-      IPolicyHolderV2: "0x5ee0c7dd",
+      IPolicyHolder: "0x02c5f90a",
       IERC721Receiver: "0x150b7a02",
       IERC4626: "0x87dfe5a0",
     };
@@ -30,7 +29,6 @@ describe("Supports interface implementation", function () {
     expect(await cfl.supportsInterface(interfaceIds.IERC721Receiver)).to.be.true;
     expect(await cfl.supportsInterface(interfaceIds.IERC721)).to.be.false; // Not an NFT collection
     expect(await cfl.supportsInterface(interfaceIds.IPolicyHolder)).to.be.true;
-    expect(await cfl.supportsInterface(interfaceIds.IPolicyHolderV2)).to.be.true;
     expect(await cfl.supportsInterface(interfaceIds.IERC20)).to.be.true;
     expect(await cfl.supportsInterface(interfaceIds.IERC20Metadata)).to.be.true;
     expect(await cfl.supportsInterface(interfaceIds.IERC4626)).to.be.true;

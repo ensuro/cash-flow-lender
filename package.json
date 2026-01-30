@@ -20,10 +20,11 @@
   },
   "dependencies": {
     "@account-abstraction/contracts": "^0.7.0",
+    "@ensuro/access-managed-proxy": "^0.3.0",
     "@ensuro/account-abstraction": "^0.1.0",
-    "@ensuro/core": "^2.9.3",
-    "@ensuro/utils": "^0.2.5",
-    "@openzeppelin/contracts": "^5.2.0",
-    "@openzeppelin/contracts-upgradeable": "^5.2.0"
+    "@ensuro/core": "^3.0.0",
+    "@ensuro/utils": "^0.3.1",
+    "@openzeppelin/contracts": "^5.5.0",
+    "@openzeppelin/contracts-upgradeable": "^5.5.0"
   }
 }
