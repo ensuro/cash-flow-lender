@@ -18,7 +18,9 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {UUPSUpgradeable} from "@openzeppelin/contracts-upgradeable/proxy/utils/UUPSUpgradeable.sol";
 import {ERC165} from "@openzeppelin/contracts/utils/introspection/ERC165.sol";
 import {IPolicyPool} from "./dependencies/IPolicyPool.sol";
+import {IRiskModule} from "./dependencies/IRiskModule.sol";
 import {IPolicyHolder} from "@ensuro/core/contracts/interfaces/IPolicyHolder.sol";
+import {Policy} from "@ensuro/core/contracts/Policy.sol";
 import {AccessManagedProxy} from "@ensuro/access-managed-proxy/contracts/AccessManagedProxy.sol";
 import {AMPUtils} from "@ensuro/access-managed-proxy/contracts/AMPUtils.sol";
 
@@ -176,25 +178,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     require(targetConfig.status == TargetStatus.active, TargetNotActive(target, targetConfig.status));
 
     // Measure the balance change
-    uint256 balanceBefore = _balance();
-
-    if (balanceBefore < uint256(targetConfig.minLiquidity)) {
-      _deinvest(uint256(targetConfig.minLiquidity) - balanceBefore);
-      balanceBefore = _balance();
-    }
+    uint256 balanceBefore = _ensureLiquidBalance(targetConfig);
     _;
-    uint256 balanceAfter = _balance();
-
-    if (balanceAfter < balanceBefore) {
-      // Should always increase the debt, but just in case...
-      int256 currDebt = _changeDebt(
-        target,
-        targetConfig.slotSize,
-        _makeSlotIndex(targetConfig.slotSize, block.timestamp),
-        (balanceBefore - balanceAfter).toInt256()
-      );
-      require(currDebt <= int256(uint256(targetConfig.debtLimit)), DebtLimitExceeded(currDebt, targetConfig.debtLimit));
-    }
+    _increaseDebtAfterNewPolicy(target, targetConfig, balanceBefore);
   }
 
   modifier forwardResolvePolicyWrapper(address target) {
@@ -563,6 +549,35 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     return AMPUtils.makeSelector(abi.encodePacked(target, selector));
   }
 
+  function _ensureLiquidBalance(TargetConfig storage targetConfig) internal returns (uint256 balanceBefore) {
+    // Measure the balance change
+    balanceBefore = _balance();
+
+    if (balanceBefore < uint256(targetConfig.minLiquidity)) {
+      _deinvest(uint256(targetConfig.minLiquidity) - balanceBefore);
+      balanceBefore = _balance();
+    }
+  }
+
+  function _increaseDebtAfterNewPolicy(
+    address target,
+    TargetConfig storage targetConfig,
+    uint256 balanceBefore
+  ) internal {
+    uint256 balanceAfter = _balance();
+
+    if (balanceAfter < balanceBefore) {
+      // Should always increase the debt, but just in case...
+      int256 currDebt = _changeDebt(
+        target,
+        targetConfig.slotSize,
+        _makeSlotIndex(targetConfig.slotSize, block.timestamp),
+        (balanceBefore - balanceAfter).toInt256()
+      );
+      require(currDebt <= int256(uint256(targetConfig.debtLimit)), DebtLimitExceeded(currDebt, targetConfig.debtLimit));
+    }
+  }
+
   function _checkCanForward(address caller, address target, bytes4 selector) internal view {
     bytes4 fakeSelector = makeFakeSelector(target, selector);
     (bool immediate, ) = AccessManagedProxy(payable(address(this))).ACCESS_MANAGER().canCall(
@@ -571,6 +586,26 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       fakeSelector
     );
     require(immediate, UnauthorizedForward(caller, target, fakeSelector));
+  }
+
+  function forwardNewPolicyV3(
+    address target,
+    bytes calldata inputData,
+    address onBehalfOf
+  ) external forwardNewPolicyWrapper(target) returns (Policy.PolicyData memory policy) {
+    _checkCanForward(_msgSender(), target, bytes4(IRiskModule.newPolicy.selector));
+    if (onBehalfOf != address(this)) _checkCanForward(_msgSender(), target, OWN_POLICY_SELECTOR);
+    return IRiskModule(target).newPolicy(inputData, onBehalfOf);
+  }
+
+  function forwardNewPoliciesV3(
+    address target,
+    bytes[] calldata inputData,
+    address onBehalfOf
+  ) external forwardNewPolicyWrapper(target) {
+    _checkCanForward(_msgSender(), target, bytes4(IRiskModule.newPolicy.selector));
+    if (onBehalfOf != address(this)) _checkCanForward(_msgSender(), target, OWN_POLICY_SELECTOR);
+    IRiskModule(target).newPolicies(inputData, onBehalfOf);
   }
 
   /**

@@ -116,6 +116,45 @@ async function vaultDeposit(vault, lp, amount, currency = undefined) {
   return vault.connect(lp).deposit(amount, lp);
 }
 
+async function createPolicyInputDataV3({ rm, cfl, fullSigner }, policyParams, onBehalfOf = undefined) {
+  const premium = policyParams.premium || MaxUint256;
+  const payout = policyParams.payout || _A(100);
+  const lossProb = policyParams.lossProb || _W("0.05");
+  const expiration = policyParams.expiration || (await helpers.time.latest()) + 30 * DAY;
+  // eslint-disable-next-line no-plusplus
+  const internalId = policyParams.internalId || ++uniqueInternalId;
+  const start = policyParams.start || (await helpers.time.latest());
+  let params;
+  if (fullSigner) {
+    const defaultParams = {
+      moc: _W(1.1),
+      jrCollRatio: 0n,
+      collRatio: _W(0.8),
+      ensuroPpFee: _W(0.1),
+      ensuroCocFee: _W(0.1),
+      jrRoc: _W("0.4"),
+      srRoc: _W("0.1"),
+    };
+    params = defaultTestParams({ ...defaultParams, ...(policyParams.params || {}) });
+  } else {
+    params = defaultTestParams(policyParams.params || {});
+  }
+  const chargedPremium =
+    premium === MaxUint256 ? await rm.getMinimumPremium(payout, lossProb, start, expiration, params) : premium;
+  const owner = await ethers.resolveAddress(onBehalfOf || cfl);
+
+  let inputData;
+  if (fullSigner) {
+    const payload = makeFTUWInputData({ payout, premium, lossProb, expiration, internalId, params });
+    const signature = await fullSigner.signMessage(payload);
+    inputData = ethers.concat([payload, signature]);
+  } else {
+    inputData = makeFTUWInputData({ payout, premium, lossProb, expiration, internalId, params });
+  }
+  const selector = rm.interface.getFunction("newPolicy").selector;
+  return { inputData, chargedPremium, selector, owner };
+}
+
 async function forwardPolicies(variant, ret, policyParams) {
   const { cfl, acMgr, admin, bridge23, rm, pool } = ret;
   if (typeof policyParams === "number") {
@@ -239,8 +278,8 @@ const directTrustfullRM = {
     return { replacePolicyCall, chargedPremium, selector: rm.interface.getFunction(method).selector };
   },
 
-  callForwardMethod: async (ret, method, target, methodCall) =>
-    ret.cfl.connect(ret.smartAccount)[method](target, methodCall),
+  callForwardMethod: async (ret, method, target, methodCall, onBehalfOf) =>
+    ret.cfl.connect(ret.smartAccount)[method](target, methodCall, ...(onBehalfOf !== undefined ? [onBehalfOf] : [])),
   expectCustomError: async (_, operation, contract, errorName, errorArgs) =>
     expect(operation)
       .to.be.revertedWithCustomError(contract, errorName)
@@ -286,9 +325,13 @@ const aaTrustfullRM = {
   createPolicyCall: directTrustfullRM.createPolicyCall,
   replacePolicyCall: directTrustfullRM.replacePolicyCall,
 
-  callForwardMethod: async (ret, method, target, methodCall) => {
+  callForwardMethod: async (ret, method, target, methodCall, onBehalfOf) => {
     const { cfl, smartAccount, bridge23, ep } = ret;
-    const forwardCall = cfl.interface.encodeFunctionData(method, [await ethers.resolveAddress(target), methodCall]);
+    const forwardCall = cfl.interface.encodeFunctionData(method, [
+      await ethers.resolveAddress(target),
+      methodCall,
+      ...(onBehalfOf !== undefined ? [await ethers.resolveAddress(onBehalfOf)] : []),
+    ]);
     const executeCall = smartAccount.interface.encodeFunctionData("execute", [
       await ethers.resolveAddress(cfl),
       0,
@@ -2020,6 +2063,197 @@ variants.forEach((variant) => {
       await expect(cfl.connect(cflAdmin).upgradeToAndCall(newCFLImpl, ethers.toUtf8Bytes("")))
         .to.emit(cfl, "Upgraded")
         .withArgs(newCFLImpl);
+    });
+
+    it("Can forward a new policy using forwardNewPolicyV3", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      const { inputData, chargedPremium, selector, owner } = await createPolicyInputDataV3(ret, {});
+
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyV3", rm, inputData, owner),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, newPolicyFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyV3", rm, inputData, owner),
+        cfl,
+        "ERC20InsufficientBalance",
+        [cfl, 0, captureAny.uint]
+      );
+
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicyV3", rm, inputData, owner))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value);
+      const newPolicy = captureAny.lastValue;
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A("0.0001"));
+
+      expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
+    });
+
+    it("Can forward a new policy owned by someone else using forwardNewPolicyV3", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      const { inputData, chargedPremium, selector, owner } = await createPolicyInputDataV3(ret, {}, anon);
+
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+      const ownedPolicyFakeSelector = await cfl.makeFakeSelector(rm, await cfl.OWN_POLICY_SELECTOR());
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await vaultDeposit(cfl, lp2, _A(100), currency);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyV3", rm, inputData, owner),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, ownedPolicyFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [ownedPolicyFakeSelector]);
+
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicyV3", rm, inputData, owner))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value);
+      const newPolicy = captureAny.lastValue;
+
+      expect(getPremium(newPolicy)).to.closeTo(chargedPremium, _A("0.0001"));
+
+      expect(await pool.ownerOf(newPolicy.id)).to.equal(anon);
+    });
+
+    it("Can forward multiple new policies using forwardNewPoliciesV3", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      let inputDataArray = [];
+      let selectors = [];
+      let totalChargedPremium = _A(0);
+
+      for (let i = 0; i < 3; i++) {
+        const { inputData, chargedPremium, selector } = await createPolicyInputDataV3(ret, {});
+        inputDataArray.push(inputData);
+        selectors.push(selector);
+        totalChargedPremium += chargedPremium;
+      }
+
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, cfl),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await vaultDeposit(cfl, lp2, _A(1000), currency);
+
+      const slotSize = await cfl.SLOTSIZE_CALENDAR_MONTH();
+      const now = new Date();
+      const year = now.getUTCFullYear();
+      const month = now.getUTCMonth() + 1;
+      const slotIndex = year * 100 + month;
+
+      const capPolicies = Array.from({ length: 3 }, newCaptureAny);
+      const [capValue, capDebtAfter, capTotalDebt] = Array.from({ length: 3 }, newCaptureAny);
+
+      await expect(variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, cfl))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, capPolicies[0].value)
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, capPolicies[1].value)
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, capPolicies[2].value)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, slotSize, slotIndex, capValue.uint, capDebtAfter.uint, capTotalDebt.uint);
+      const totalPremium = capPolicies.reduce((acc, curr) => acc + getPremium(curr.lastValue), 0n);
+      expect(totalPremium).to.equal(capValue.lastUint);
+      expect(totalPremium).to.equal(capDebtAfter.lastUint);
+      expect(totalPremium).to.equal(capTotalDebt.lastUint);
+
+      expect(await cfl.currentDebt()).to.be.closeTo(totalChargedPremium, _A(0.1));
+      expect(await cfl.currentDebt()).to.be.equal(totalPremium);
+      expect(totalPremium).to.closeTo(totalChargedPremium, _A(0.01));
+    });
+
+    it("Can forward multiple new policies owned by someone else using forwardNewPoliciesV3", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      let inputDataArray = [];
+      let selectors = [];
+      let totalChargedPremium = _A(0);
+
+      for (let i = 0; i < 3; i++) {
+        const { inputData, chargedPremium, selector } = await createPolicyInputDataV3(ret, {}, anon);
+        inputDataArray.push(inputData);
+        selectors.push(selector);
+        totalChargedPremium += chargedPremium;
+      }
+
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+      const ownedPolicyFakeSelector = await cfl.makeFakeSelector(rm, await cfl.OWN_POLICY_SELECTOR());
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, anon),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await vaultDeposit(cfl, lp2, _A(1000), currency);
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, anon),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, ownedPolicyFakeSelector]
+      );
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [ownedPolicyFakeSelector]);
+
+      const receipt = await (
+        await variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, anon)
+      ).wait();
+      const newPolicyEvents = getTransactionEvent(pool.interface, receipt, "NewPolicy", false, getAddress(pool));
+      const newPolicies = newPolicyEvents.map((evt) => evt.args.policy);
+      const totalPremium = newPolicies.reduce((acc, curr) => acc + getPremium(curr), 0n);
+      expect(totalPremium).to.closeTo(totalChargedPremium, _A("0.01"));
+
+      for (const policy of newPolicies) {
+        expect(await pool.ownerOf(policy.id)).to.equal(anon);
+      }
     });
   });
 });
