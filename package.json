@@ -10,7 +10,7 @@
     "@openzeppelin/hardhat-upgrades": "^3.9.0",
     "eslint": "^9.19.0",
     "eslint-config-prettier": "^10.0.1",
-    "hardhat": "^2.22.18",
+    "hardhat": "^2.29.0",
     "hardhat-contract-sizer": "^2.10.0",
     "hardhat-dependency-compiler": "^1.2.1",
     "hardhat-exposed": "^0.3.18",
