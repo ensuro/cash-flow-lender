@@ -58,7 +58,12 @@ function initialize(string memory name_, string memory symbol_, IERC4626 yieldVa
 
 #### Access control
 
-Calls to the `forward*` methods are validated against the `AccessManager` attached to the `AccessManagedProxy`: every allowed `(target, selector)` pair has a "fake selector" that can be computed with `makeFakeSelector(target, selector)` and granted to the operator roles. Creating policies not owned by the CFL additionally requires permission on `makeFakeSelector(target, OWN_POLICY_SELECTOR)`.
+Access control is enforced in two layers — once by the forward method and once by the target:
+
+- **By method (proxy layer):** the `AccessManagedProxy` validates every call against the `AccessManager` by selector, using the real `msg.sender` (the trusted forwarder or a plain EOA).
+- **By target (`_checkCanForward`):** every `forward*` method uses `_msgSender()` (ERC-2771). When invoked through the trusted forwarder, `_msgSender()` recovers the sender from the address in the last 20 bytes of the calldata — the caller injected by the trusted forwarder, not the forwarder itself. That injected sender is passed to the internal `_checkCanForward(caller, target, selector)`, which checks it against the `AccessManager` on a "fake selector" computed with `makeFakeSelector(target, selector)` that encodes the target.
+
+Every allowed `(target, selector)` pair has a fake selector granted to the operator roles. Creating policies not owned by the CFL additionally requires permission on `makeFakeSelector(target, OWN_POLICY_SELECTOR)`.
 
 #### `IPolicyHolder` callbacks
 
