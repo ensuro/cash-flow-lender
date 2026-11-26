@@ -583,7 +583,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   function _deinvest(uint256 amount) internal returns (uint256 deinvested) {
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
     deinvested = Math.min(amount, $._yieldVault.maxWithdraw(address(this)));
-    $._yieldVault.withdraw(deinvested, address(this), address(this));
+    if (deinvested != 0) $._yieldVault.withdraw(deinvested, address(this), address(this));
   }
 
   function _changeDebt(

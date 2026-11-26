@@ -658,7 +658,8 @@ variants.forEach((variant) => {
 
       await expect(cfl.connect(cflAdmin).setYieldVault(newVault, false))
         .to.emit(cfl, "YieldVaultChanged")
-        .withArgs(yieldVault, newVault);
+        .withArgs(yieldVault, newVault)
+        .to.not.emit(yieldVault, "Withdraw");
       expect(await cfl.yieldVault()).to.equal(newVault);
 
       expect(await currency.balanceOf(newVault)).to.equal(0);
@@ -965,6 +966,29 @@ variants.forEach((variant) => {
       expect(captureAny.lastUint).to.equal(_A(50)); // Just 50 remaining in the yieldVault
       expect(await currency.balanceOf(cfl)).to.equal(_A(300) - _A(60 * 2));
       expect(await currency.balanceOf(yieldVault)).to.equal(0);
+    });
+
+    it("doesn't withdraw from yield vault when there is nothing to deinvest", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp, cflAdmin, rm, pool, bridge23, acMgr, admin, yieldVault } = ret;
+
+      // No funds in the yield vault
+      await vaultDeposit(cfl, lp, _A(100), currency);
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(200));
+
+      const { newPolicyCall, selector } = await variant.createPolicyCall(ret, { premium: _A(10) });
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, selector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      // minLiquidity triggers a deinvest attempt, but maxWithdraw is 0 so no withdraw should be called
+      await expect(variant.callForwardMethod(ret, "forwardNewPolicy", rm, newPolicyCall))
+        .to.emit(pool, "NewPolicy")
+        .withArgs(rm, captureAny.value)
+        .to.not.emit(yieldVault, "Withdraw");
+
+      expect(await currency.balanceOf(cfl)).to.equal(_A(90));
     });
 
     it("Withdraw should deinvest from yield vault when cash is insufficient & fail when funds not enough due to debt", async function () {
