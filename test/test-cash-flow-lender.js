@@ -1799,6 +1799,7 @@ variants.forEach((variant) => {
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo } = ret;
 
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+      await cfl.connect(cflAdmin).setCashOutDestination(rm, bo);
       await vaultDeposit(cfl, lp2, _A(100), currency);
 
       const [newPolicy] = await (await forwardPolicies(variant, ret, [{ premium: _A(70) }])).getPolicies();
@@ -1822,21 +1823,62 @@ variants.forEach((variant) => {
       const pastSlotIndex = year * 100 + month; // Al igual que en repayDebt me da error si utilizo timeIncrease
 
       const partialCashoutPayouts = _A(20);
-      await expect(cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, partialCashoutPayouts, bo))
+      await expect(cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, partialCashoutPayouts))
         .to.emit(cfl, "CashOutPayout")
         .withArgs(rm, slotSize, pastSlotIndex, partialCashoutPayouts, initialDebt + partialCashoutPayouts, bo);
       const debtAfterPartial = await cfl.currentDebt();
       expect(debtAfterPartial).to.be.closeTo(initialDebt + partialCashoutPayouts, _A(0.1));
 
-      await expect(
-        cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, _A(20), bo)
-      ).to.be.revertedWithCustomError(cfl, "CashOutExceedsLimit");
+      await expect(cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, _A(20))).to.be.revertedWithCustomError(
+        cfl,
+        "CashOutExceedsLimit"
+      );
 
-      await expect(cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, _A(10), bo))
+      await expect(cfl.connect(bo).cashOutPayouts(rm, slotSize, pastSlotIndex, _A(10)))
         .to.emit(cfl, "CashOutPayout")
         .withArgs(rm, slotSize, pastSlotIndex, _A(10), 0, bo);
       const finalDebt = await cfl.currentDebt();
       expect(finalDebt).to.equal(0);
+    });
+
+    it("Configures the cash-out destination per target or default", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, rm, cflAdmin, lp2, bo } = ret;
+
+      // Can't configure a destination for an unknown target
+      await expect(cfl.connect(cflAdmin).setCashOutDestination(rm, bo)).to.be.revertedWithCustomError(
+        cfl,
+        "TargetNotFound"
+      );
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      // No destination configured -> cashOutPayouts fails
+      await expect(cfl.connect(bo).cashOutPayouts(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), 0, _A(1)))
+        .to.be.revertedWithCustomError(cfl, "CashOutDestinationNotConfigured")
+        .withArgs(rm);
+
+      expect(await cfl.defaultCashOutDestination()).to.equal(ZeroAddress);
+      expect(await cfl.getCashOutDestination(rm)).to.equal(ZeroAddress);
+
+      // Setting the default destination
+      await expect(cfl.connect(cflAdmin).setDefaultCashOutDestination(lp2))
+        .to.emit(cfl, "DefaultCashOutDestinationChanged")
+        .withArgs(ZeroAddress, lp2);
+      expect(await cfl.defaultCashOutDestination()).to.equal(lp2);
+      expect(await cfl.getCashOutDestination(rm)).to.equal(lp2);
+
+      // Setting a target-specific destination overrides the default
+      await expect(cfl.connect(cflAdmin).setCashOutDestination(rm, bo))
+        .to.emit(cfl, "CashOutDestinationChanged")
+        .withArgs(rm, ZeroAddress, bo);
+      expect(await cfl.getCashOutDestination(rm)).to.equal(bo);
+
+      // Clearing the target-specific destination falls back to the default
+      await expect(cfl.connect(cflAdmin).setCashOutDestination(rm, ZeroAddress))
+        .to.emit(cfl, "CashOutDestinationChanged")
+        .withArgs(rm, bo, ZeroAddress);
+      expect(await cfl.getCashOutDestination(rm)).to.equal(lp2);
     });
 
     it("It doesn't mix debt of different slots", async () => {
@@ -1844,6 +1886,7 @@ variants.forEach((variant) => {
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo, yieldVault } = ret;
 
       await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+      await cfl.connect(cflAdmin).setCashOutDestination(rm, bo);
       await vaultDeposit(cfl, lp2, _A(100), currency);
 
       const premium = _A(70);
@@ -1888,12 +1931,12 @@ variants.forEach((variant) => {
       expect(await cfl.cashWithdrawable()).to.equal(_A(10) - premium + payout); // 40
 
       // Check cashOutPayouts don't work on the initial slot because there debt is positive
-      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex1, _A(1), bo))
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex1, _A(1)))
         .to.be.revertedWithCustomError(cfl, "CashOutExceedsLimit")
         .withArgs(_A(1), premium + _A(1));
 
       // Check cashOutPayouts doesn't work on the second slot because of lack of cash
-      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout, bo)).to.be.revertedWithCustomError(
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout)).to.be.revertedWithCustomError(
         cfl,
         "NotEnoughCash"
       );
@@ -1914,7 +1957,7 @@ variants.forEach((variant) => {
       );
 
       // It can also fail because not all the funds are withdrawable
-      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo)).to.be.revertedWithCustomError(
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40))).to.be.revertedWithCustomError(
         cfl,
         "NotEnoughCash"
       );
@@ -1922,7 +1965,7 @@ variants.forEach((variant) => {
       await yieldVault.setOverride(OverrideOption.withdraw, await yieldVault.OVERRIDE_UNSET());
 
       // Withdrawal of 40 now works
-      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40), bo))
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, _A(40)))
         .to.emit(cfl, "CashOutPayout")
         .withArgs(rm, DAY, slotIndex2, _A(40), -_A(60), bo)
         .to.emit(cfl, "DebtChanged")
@@ -1945,7 +1988,7 @@ variants.forEach((variant) => {
       expect(await currency.allowance(cfl, bo)).to.equal(0);
 
       // Now the cashOutPayouts of the remaining debt with the customer works
-      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout - _A(40), bo))
+      await expect(cfl.connect(bo).cashOutPayouts(rm, DAY, slotIndex2, payout - _A(40)))
         .to.emit(cfl, "CashOutPayout")
         .withArgs(rm, DAY, slotIndex2, payout - _A(40), 0, bo)
         .to.emit(cfl, "DebtChanged")

@@ -100,6 +100,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     int96 _totalDebt;
     mapping(address => TargetConfig) _targets;
     mapping(TargetSlot => int256) _debtByPeriod;
+    mapping(address => address) _cashOutDestinations;
+    address _defaultCashOutDestination;
   }
 
   // keccak256(abi.encode(uint256(keccak256("ensuro.storage.CashFlowLender")) - 1)) & ~bytes32(uint256(0xff))
@@ -149,6 +151,8 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   );
   event TargetStatusChanged(address indexed target, TargetStatus oldStatus, TargetStatus newStatus);
   event TargetSlotSizeChanged(address indexed target, uint32 oldSlotSize, uint32 newSlotSize);
+  event CashOutDestinationChanged(address indexed target, address oldDestination, address newDestination);
+  event DefaultCashOutDestinationChanged(address oldDestination, address newDestination);
 
   error InvalidPolicyPool();
   error OnlyPolicyPool(address sender);
@@ -164,6 +168,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error NotEnoughCash();
   error TargetNotFound(address target);
   error CashOutExceedsLimit(uint256 amount, int256 debtAfter);
+  error CashOutDestinationNotConfigured(address target);
   error RepaymentExceedsLimit(uint256 amount, int256 debtAfter);
   error CannotDeinvestYieldVault();
 
@@ -279,6 +284,12 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     require(targetConfig.status != TargetStatus.inactive, TargetNotFound(target));
   }
 
+  function _cashOutDestination(address target) internal view returns (address destination) {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    destination = $._cashOutDestinations[target];
+    if (destination == address(0)) destination = $._defaultCashOutDestination;
+  }
+
   /**
    * @dev Adds a new target that can be used later to forward policies and track the debt.
    *
@@ -355,6 +366,55 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     TargetConfig storage targetConfig = _getTargetConfig(target);
     emit TargetSlotSizeChanged(target, targetConfig.slotSize, newSlotSize);
     targetConfig.slotSize = newSlotSize;
+  }
+
+  /**
+   * @dev Sets the destination address used by {cashOutPayouts} for a given target. Setting it to address(0) makes
+   *      the target use the default destination (see {setDefaultCashOutDestination}).
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param destination Address that will receive the payouts of this target.
+   *
+   * Emits a {CashOutDestinationChanged} event
+   */
+  function setCashOutDestination(address target, address destination) external {
+    _getTargetConfig(target);
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    address oldDestination = $._cashOutDestinations[target];
+    $._cashOutDestinations[target] = destination;
+    emit CashOutDestinationChanged(target, oldDestination, destination);
+  }
+
+  /**
+   * @dev Sets the default destination address used by {cashOutPayouts} for the targets that don't have a specific
+   *      destination configured.
+   *
+   * @param destination Address that will receive the payouts of the targets without a specific destination.
+   *
+   * Emits a {DefaultCashOutDestinationChanged} event
+   */
+  function setDefaultCashOutDestination(address destination) external {
+    CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
+    address oldDestination = $._defaultCashOutDestination;
+    $._defaultCashOutDestination = destination;
+    emit DefaultCashOutDestinationChanged(oldDestination, destination);
+  }
+
+  /**
+   * @dev Returns the destination address used by {cashOutPayouts} for a given target, considering the target's
+   *      specific destination and the default one.
+   *
+   * @param target Address of the target contract.
+   */
+  function getCashOutDestination(address target) external view returns (address) {
+    return _cashOutDestination(target);
+  }
+
+  /**
+   * @dev Returns the default destination address used by {cashOutPayouts}.
+   */
+  function defaultCashOutDestination() external view returns (address) {
+    return _getCashFlowLenderStorage()._defaultCashOutDestination;
   }
 
   /// @inheritdoc ERC165
@@ -843,6 +903,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    *
    *      Requires the debt of the slot <= -amount
    *      Requires the CFL has enough funds (liquid + invested in the $._yieldVault)
+   *      Requires a destination is configured for the target, either specifically or as the default destination
    *
    *      emits {CashOutPayout}
    *
@@ -850,16 +911,11 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @param slotSize Duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
    * @param slotIndex Current slot time selected
    * @param amount Amount to cash out
-   * @param destination Address that will receive the funds
    */
-  function cashOutPayouts(
-    address target,
-    uint32 slotSize,
-    uint32 slotIndex,
-    uint256 amount,
-    address destination
-  ) external {
+  function cashOutPayouts(address target, uint32 slotSize, uint32 slotIndex, uint256 amount) external {
     _getTargetConfig(target);
+    address destination = _cashOutDestination(target);
+    require(destination != address(0), CashOutDestinationNotConfigured(target));
     // Modify the debt
     int256 debtAfter = _changeDebt(target, slotSize, slotIndex, amount.toInt256());
     require(debtAfter <= 0, CashOutExceedsLimit(amount, debtAfter));
