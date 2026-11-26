@@ -158,6 +158,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error InvalidSlotSize();
   error DebtLimitExceeded(int256 currentDebt, uint96 debtLimit);
   error UnauthorizedForward(address caller, address target, bytes4 requiredSelector);
+  error InvalidForwardMethod(address target, bytes4 selector);
   error BalanceDecreasedOnResolve(uint256 balanceReduction);
   error YieldVaultIsRequired();
   error NotEnoughCash();
@@ -588,6 +589,18 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     require(immediate, UnauthorizedForward(caller, target, fakeSelector));
   }
 
+  function _checkNewPolicyMethod(address target, bytes4 selector) internal pure {
+    if (selector != IRiskModule.newPolicy.selector && selector != IRiskModule.replacePolicy.selector) {
+      revert InvalidForwardMethod(target, selector);
+    }
+  }
+
+  function _checkResolvePolicyMethod(address target, bytes4 selector) internal pure {
+    if (selector != IRiskModule.resolvePolicy.selector && selector != IRiskModule.cancelPolicy.selector) {
+      revert InvalidForwardMethod(target, selector);
+    }
+  }
+
   function forwardNewPolicyV3(
     address target,
     bytes calldata inputData,
@@ -632,7 +645,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     address target,
     bytes calldata data
   ) external forwardNewPolicyWrapper(target) returns (bytes memory result) {
-    _checkCanForward(_msgSender(), target, bytes4(data[0:4]));
+    bytes4 selector = bytes4(data[0:4]);
+    _checkNewPolicyMethod(target, selector);
+    _checkCanForward(_msgSender(), target, selector);
     result = target.functionCall(data);
     uint256 policyId = abi.decode(result, (uint256));
     if (IERC721(address(_policyPool)).ownerOf(policyId) != address(this)) {
@@ -672,6 +687,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
+        _checkNewPolicyMethod(target, selector);
         _checkCanForward(_msgSender(), target, selector);
         lastSelector = selector;
       }
@@ -701,7 +717,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     address target,
     bytes calldata data
   ) external forwardResolvePolicyWrapper(target) returns (bytes memory result) {
-    _checkCanForward(_msgSender(), target, bytes4(data[0:4]));
+    bytes4 selector = bytes4(data[0:4]);
+    _checkResolvePolicyMethod(target, selector);
+    _checkCanForward(_msgSender(), target, selector);
     result = target.functionCall(data);
   }
 
@@ -725,6 +743,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       bytes4 selector = bytes4(data[i][0:4]);
       if (i == 0 || selector != lastSelector) {
         // After the first one, only re-checks if the selector changed
+        _checkResolvePolicyMethod(target, selector);
         _checkCanForward(_msgSender(), target, selector);
         lastSelector = selector;
       }

@@ -545,6 +545,64 @@ variants.forEach((variant) => {
       expect(await pool.ownerOf(newPolicy.id)).to.equal(cfl);
     });
 
+    it("Restricts the methods allowed in each forward method", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, rm, cflAdmin } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
+
+      const newPolicySelector = rm.interface.getFunction("newPolicy").selector;
+      const replacePolicySelector = rm.interface.getFunction("replacePolicy").selector;
+      const resolvePolicySelector = rm.interface.getFunction("resolvePolicy").selector;
+      const cancelPolicySelector = rm.interface.getFunction("cancelPolicy").selector;
+
+      // forwardNewPolicy only accepts newPolicy or replacePolicy
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, resolvePolicySelector),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, resolvePolicySelector]
+      );
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicy", rm, cancelPolicySelector),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, cancelPolicySelector]
+      );
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, [resolvePolicySelector, newPolicySelector]),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, resolvePolicySelector]
+      );
+
+      // forwardResolvePolicy only accepts resolvePolicy or cancelPolicy
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm, newPolicySelector),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, newPolicySelector]
+      );
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicy", rm, replacePolicySelector),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, replacePolicySelector]
+      );
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, [newPolicySelector, resolvePolicySelector]),
+        cfl,
+        "InvalidForwardMethod",
+        [rm, newPolicySelector]
+      );
+    });
+
     it("Can forward a new policy owned by someone else", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, anon } = ret;
@@ -1198,15 +1256,14 @@ variants.forEach((variant) => {
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
       await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
-      // Calling another selector, not authorized fails too
-      const batchFakeSelector2 = await cfl.makeFakeSelector(rm, "0x12345678");
+      // Calling a method not allowed in forwardNewPolicyBatch fails
       const policyCalls2 = [policyCalls[0], "0x12345678", policyCalls[2]];
       await variant.expectCustomError(
         ret,
         variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, policyCalls2),
         cfl,
-        "UnauthorizedForward",
-        [bridge23, rm, batchFakeSelector2]
+        "InvalidForwardMethod",
+        [rm, "0x12345678"]
       );
 
       // Owner policies also require a different permission
@@ -1317,27 +1374,18 @@ variants.forEach((variant) => {
         totalChargedPremium2 += chargedPremium;
       }
 
+      // Replace policies shouldn't be called with forwardResolvePolicyBatch (only resolve/cancel allowed)
       await variant.expectCustomError(
         ret,
         variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
         cfl,
-        "UnauthorizedForward",
-        [bridge23, rm, replaceFakeSelector]
+        "InvalidForwardMethod",
+        [rm, rm.interface.getFunction("replacePolicy").selector]
       );
 
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [replaceFakeSelector]);
 
-      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
-      await variant.expectCustomError(
-        ret,
-        variant.callForwardMethod(ret, "forwardResolvePolicyBatch", rm, replaceCalls),
-        cfl,
-        "BalanceDecreasedOnResolve",
-        [captureAny.value]
-      );
-      if (!variant.usesAA) expect(captureAny.lastValue).to.closeTo(totalChargedPremium2, 10n);
-
-      // Replace policies shouldn't be called with forwardResolvePolicyBatch, but instead forwardNewPolicyBatch
+      // Replace policies should be called with forwardNewPolicyBatch
       const replaceTx = await variant.callForwardMethod(ret, "forwardNewPolicyBatch", rm, replaceCalls);
       const replaceReceipt = await replaceTx.wait();
 
