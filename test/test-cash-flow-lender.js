@@ -2239,17 +2239,28 @@ variants.forEach((variant) => {
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       let inputDataArray = [];
-      let selectors = [];
       let totalChargedPremium = _A(0);
 
       for (let i = 0; i < 3; i++) {
-        const { inputData, chargedPremium, selector } = await createPolicyInputDataV3(ret, {});
+        const { inputData, chargedPremium } = await createPolicyInputDataV3(ret, {});
         inputDataArray.push(inputData);
-        selectors.push(selector);
         totalChargedPremium += chargedPremium;
       }
 
-      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, rm.interface.getFunction("newPolicies").selector);
+      const newPolicyFakeSelector = await cfl.makeFakeSelector(rm, rm.interface.getFunction("newPolicy").selector);
+
+      await variant.expectCustomError(
+        ret,
+        variant.callForwardMethod(ret, "forwardNewPoliciesV3", rm, inputDataArray, cfl),
+        cfl,
+        "UnauthorizedForward",
+        [bridge23, rm, batchFakeSelector]
+      );
+
+      // The single-policy permission is not enough for the batch method
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [newPolicyFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
       await variant.expectCustomError(
         ret,
@@ -2260,7 +2271,6 @@ variants.forEach((variant) => {
       );
 
       await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [batchFakeSelector]);
-      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
 
       await vaultDeposit(cfl, lp2, _A(1000), currency);
 
@@ -2299,17 +2309,15 @@ variants.forEach((variant) => {
       await cfl.connect(cflAdmin).addTarget(rm, await cfl.SLOTSIZE_CALENDAR_MONTH(), _A(1000), _A(0));
 
       let inputDataArray = [];
-      let selectors = [];
       let totalChargedPremium = _A(0);
 
       for (let i = 0; i < 3; i++) {
-        const { inputData, chargedPremium, selector } = await createPolicyInputDataV3(ret, {}, anon);
+        const { inputData, chargedPremium } = await createPolicyInputDataV3(ret, {}, anon);
         inputDataArray.push(inputData);
-        selectors.push(selector);
         totalChargedPremium += chargedPremium;
       }
 
-      const batchFakeSelector = await cfl.makeFakeSelector(rm, selectors[0]);
+      const batchFakeSelector = await cfl.makeFakeSelector(rm, rm.interface.getFunction("newPolicies").selector);
       const ownedPolicyFakeSelector = await cfl.makeFakeSelector(rm, await cfl.OWN_POLICY_SELECTOR());
 
       await variant.expectCustomError(

@@ -676,7 +676,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     bytes[] calldata inputData,
     address onBehalfOf
   ) external forwardNewPolicyWrapper(target) {
-    _checkCanForward(_msgSender(), target, bytes4(IRiskModule.newPolicy.selector));
+    _checkCanForward(_msgSender(), target, bytes4(IRiskModule.newPolicies.selector));
     if (onBehalfOf != address(this)) _checkCanForward(_msgSender(), target, OWN_POLICY_SELECTOR);
     IRiskModule(target).newPolicies(inputData, onBehalfOf);
   }
