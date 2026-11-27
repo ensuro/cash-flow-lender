@@ -48,11 +48,13 @@ _Policy-creation calls can be routed through `forwardResolvePolicy`, bypassing d
 selector reverts with the `InvalidForwardMethod` custom error, so policies can no longer be created through the
 resolve path.
 
-## Finding #5 — Pending (Medium)
+## Finding #5 — Fixed (Medium)
 
 _Yield-vault deposits lack a minimum-share check and can donate all liquid CFL assets through ERC-4626 rounding._
 
-Planned fix in a follow-up commit on this branch.
+`depositIntoYieldVault` now checks the number of shares returned by the yield vault and reverts with
+`YieldVaultDepositReturnedNoShares` when a non-zero deposit mints zero shares. Zero-amount deposits are handled as a
+no-op without calling the yield vault.
 
 ## Finding #6 — Pending (Medium)
 

@@ -786,6 +786,28 @@ variants.forEach((variant) => {
       expect(await yieldVault.totalAssets()).to.equal(_A(1000));
     });
 
+    it("Reverts when the yield vault deposit mints zero shares", async function () {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, cflAdmin, yieldVault, lp, lp2 } = ret;
+
+      await vaultDeposit(cfl, lp, _A(1000), currency);
+
+      // Inflate the yield vault share price: one share backed by a large donation
+      await vaultDeposit(yieldVault, lp2, 1n, currency);
+      await currency.connect(lp2).transfer(yieldVault, _A(300));
+
+      expect(await yieldVault.previewDeposit(_A(100))).to.equal(0);
+
+      await expect(cfl.connect(cflAdmin).depositIntoYieldVault(_A(100)))
+        .to.be.revertedWithCustomError(cfl, "YieldVaultDepositReturnedNoShares")
+        .withArgs(_A(100));
+
+      // A zero-amount deposit is a no-op and doesn't call the yield vault
+      await expect(cfl.connect(cflAdmin).depositIntoYieldVault(0)).to.not.emit(yieldVault, "Deposit");
+
+      expect(await currency.balanceOf(cfl)).to.equal(_A(1000));
+    });
+
     it("Should allow partial & MaxUint256 withdraws from yield vault, fails if there are not enough funds", async function () {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, currency, cflAdmin, yieldVault, lp } = ret;

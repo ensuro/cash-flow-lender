@@ -175,6 +175,7 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
   error CashOutDestinationNotConfigured(address target);
   error RepaymentExceedsLimit(uint256 amount, int256 debtAfter);
   error CannotDeinvestYieldVault();
+  error YieldVaultDepositReturnedNoShares(uint256 amount);
 
   modifier onlyPolicyPool() {
     // I intentionally use msg.sender instead of _msgSender() because I know the PolicyPool won't call
@@ -898,7 +899,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
       require(amount <= _balance(), NotEnoughCash());
     }
     CashFlowLenderStorage storage $ = _getCashFlowLenderStorage();
-    $._yieldVault.deposit(amount, address(this));
+    if (amount != 0) {
+      require($._yieldVault.deposit(amount, address(this)) != 0, YieldVaultDepositReturnedNoShares(amount));
+    }
   }
 
   /**
