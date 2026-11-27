@@ -961,4 +961,40 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
     IERC20Metadata(asset()).safeTransferFrom(_msgSender(), address(this), amount);
     emit RepayDebt(target, slotSize, slotIndex, amount, debtAfter, _msgSender());
   }
+
+  /**
+   * @dev Compensates the debt of a target between two periods without moving funds. It reduces the negative debt of
+   *      `negativeSlotIndex` (the amount the CFL owes the partner) and the positive debt of `positiveSlotIndex`
+   *      (the amount the partner owes the CFL) by the same amount. The global debt doesn't change.
+   *
+   *      Requires the debt of `negativeSlotIndex` to be <= -amount and the debt of `positiveSlotIndex` to be >= amount.
+   *
+   *      emits {CashOutPayout} and {RepayDebt}, both with address(0) as destination/payer
+   *
+   * @param target Address of the target contract. It must be one previously added with {addTarget}.
+   * @param slotSize Duration in seconds of the slots used to track the debt. The debt uses UTC aligned slots.
+   * @param negativeSlotIndex Slot with negative debt that will be reduced in absolute value.
+   * @param positiveSlotIndex Slot with positive debt that will be reduced.
+   * @param amount Amount of debt to compensate.
+   */
+  function compensateDebt(
+    address target,
+    uint32 slotSize,
+    uint32 negativeSlotIndex,
+    uint32 positiveSlotIndex,
+    uint256 amount
+  ) external {
+    _getTargetConfig(target);
+    int256 amountInt = amount.toInt256();
+
+    // Reduce the negative debt of the period (as if the partner cashed out the payout)
+    int256 negativeDebtAfter = _changeDebt(target, slotSize, negativeSlotIndex, amountInt);
+    require(negativeDebtAfter <= 0, CashOutExceedsLimit(amount, negativeDebtAfter));
+    emit CashOutPayout(target, slotSize, negativeSlotIndex, amount, negativeDebtAfter, address(0));
+
+    // Reduce the positive debt of the period (as if the partner repaid the debt)
+    int256 positiveDebtAfter = _changeDebt(target, slotSize, positiveSlotIndex, -amountInt);
+    require(positiveDebtAfter >= 0, RepaymentExceedsLimit(amount, positiveDebtAfter));
+    emit RepayDebt(target, slotSize, positiveSlotIndex, amount, positiveDebtAfter, address(0));
+  }
 }

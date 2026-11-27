@@ -38,16 +38,17 @@ Each target is configured with a slot size (`SLOTSIZE_CALENDAR_MONTH` for calend
 
 Debt and liquidity:
 
-| Function                                                                            | Description                                                                                                |
-| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| `currentDebt()`                                                                     | Global debt tracked by the CFL.                                                                            |
-| `getDebtForPeriod(address target, uint32 slotSize, uint32 slotIndex)`               | Debt for a given target and period.                                                                        |
-| `cashOutPayouts(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)` | Sends `amount` to the configured destination, reducing a negative debt.                                    |
-| `repayDebt(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)`      | Pulls `amount` from the caller, reducing a positive debt.                                                  |
-| `yieldVault()`                                                                      | The ERC-4626 vault where idle funds are invested.                                                          |
-| `setYieldVault(IERC4626 newVault, bool force)`                                      | Deinvests and switches to a new yield vault. `force` abandons non-withdrawable old-vault assets.           |
-| `depositIntoYieldVault(uint256 amount)` / `withdrawFromYieldVault(uint256 amount)`  | Moves funds in/out of the yield vault (`type(uint256).max` = all). Reverts if a deposit mints zero shares. |
-| `cashWithdrawable()`                                                                | Liquid funds available immediately (balance + `maxWithdraw` from the yield vault).                         |
+| Function                                                                                                              | Description                                                                                                |
+| --------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `currentDebt()`                                                                                                       | Global debt tracked by the CFL.                                                                            |
+| `getDebtForPeriod(address target, uint32 slotSize, uint32 slotIndex)`                                                 | Debt for a given target and period.                                                                        |
+| `cashOutPayouts(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)`                                   | Sends `amount` to the configured destination, reducing a negative debt.                                    |
+| `repayDebt(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)`                                        | Pulls `amount` from the caller, reducing a positive debt.                                                  |
+| `compensateDebt(address target, uint32 slotSize, uint32 negativeSlotIndex, uint32 positiveSlotIndex, uint256 amount)` | Offsets negative and positive debt of the same target without moving funds.                                |
+| `yieldVault()`                                                                                                        | The ERC-4626 vault where idle funds are invested.                                                          |
+| `setYieldVault(IERC4626 newVault, bool force)`                                                                        | Deinvests and switches to a new yield vault. `force` abandons non-withdrawable old-vault assets.           |
+| `depositIntoYieldVault(uint256 amount)` / `withdrawFromYieldVault(uint256 amount)`                                    | Moves funds in/out of the yield vault (`type(uint256).max` = all). Reverts if a deposit mints zero shares. |
+| `cashWithdrawable()`                                                                                                  | Liquid funds available immediately (balance + `maxWithdraw` from the yield vault).                         |
 
 The ERC-4626 asset is taken from `policyPool.currency()` and `totalAssets()` is the sum of the liquid balance, the value of the yield vault position and the outstanding debt.
 
