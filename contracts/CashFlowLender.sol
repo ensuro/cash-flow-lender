@@ -264,7 +264,9 @@ contract CashFlowLender is ERC2771ContextUpgradeable, UUPSUpgradeable, ERC4626Up
    * @dev Changes the Yield Vault, deinvesting all the funds before doing it.
    *
    * @param yieldVault_ An ERC-4626 vault where funds can be deployed to generate extra yields for the CFL LPs.
-   * @param force If true, it continues the operation even if some of the funds aren't withdrawable.
+   * @param force If true, it continues the operation even if some of the funds aren't withdrawable. In that case the
+   *              remaining old-vault shares are abandoned and excluded from accounting; only use it when the caller
+   *              explicitly accepts that loss.
    *
    * Emits a {YieldVaultChanged} event
    */

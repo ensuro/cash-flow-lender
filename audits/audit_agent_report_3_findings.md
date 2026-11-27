@@ -56,11 +56,16 @@ _Yield-vault deposits lack a minimum-share check and can donate all liquid CFL a
 `YieldVaultDepositReturnedNoShares` when a non-zero deposit mints zero shares. Zero-amount deposits are handled as a
 no-op without calling the yield vault.
 
-## Finding #6 — Pending (Medium)
+## Finding #6 — Acknowledged (Medium)
 
 _Forced yield-vault migration abandons residual old-vault shares from accounting._
 
-Planned fix in a follow-up commit on this branch.
+This is the intended purpose of the `force` parameter. Without `force`, `setYieldVault` reverts with
+`CannotDeinvestYieldVault` when the old vault cannot return the full position. Forcing the migration is performed by
+an authorized operator who explicitly accepts that assets that cannot be withdrawn from the old vault will be
+abandoned. Since there is no on-chain way to make a broken vault release those funds, this is the only way to migrate
+to a working vault and preserve the rest of the CFL's operations. We acknowledge that the abandoned shares are
+excluded from accounting and accept it as a deliberate risk of the forced migration.
 
 ## Finding #7 — Fixed (Medium)
 
