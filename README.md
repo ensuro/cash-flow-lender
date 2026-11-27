@@ -32,19 +32,22 @@ Each target is configured with a slot size (`SLOTSIZE_CALENDAR_MONTH` for calend
 | `setTargetStatus(address target, TargetStatus newStatus)`                             | Sets `active`, `deprecated` (only resolutions) or `suspended`. |
 | `setTargetSlotSize(address target, uint32 newSlotSize)`                               | Changes the period size.                                       |
 | `getTargetStatus(address target)`                                                     | Returns the target's current status.                           |
+| `setCashOutDestination(address target, address destination)`                          | Sets the destination for a target (zero uses the default).     |
+| `setDefaultCashOutDestination(address destination)`                                   | Sets the default destination for targets without one.          |
+| `getCashOutDestination(address target)`                                               | Returns the effective destination for a target.                |
 
 Debt and liquidity:
 
-| Function                                                                                                 | Description                                                                        |
-| -------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `currentDebt()`                                                                                          | Global debt tracked by the CFL.                                                    |
-| `getDebtForPeriod(address target, uint32 slotSize, uint32 slotIndex)`                                    | Debt for a given target and period.                                                |
-| `cashOutPayouts(address target, uint32 slotSize, uint32 slotIndex, uint256 amount, address destination)` | Sends `amount` to `destination`, reducing a negative debt.                         |
-| `repayDebt(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)`                           | Pulls `amount` from the caller, reducing a positive debt.                          |
-| `yieldVault()`                                                                                           | The ERC-4626 vault where idle funds are invested.                                  |
-| `setYieldVault(IERC4626 newVault, bool force)`                                                           | Deinvests and switches to a new yield vault.                                       |
-| `depositIntoYieldVault(uint256 amount)` / `withdrawFromYieldVault(uint256 amount)`                       | Moves funds in/out of the yield vault (`type(uint256).max` = all).                 |
-| `cashWithdrawable()`                                                                                     | Liquid funds available immediately (balance + `maxWithdraw` from the yield vault). |
+| Function                                                                            | Description                                                                                                |
+| ----------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
+| `currentDebt()`                                                                     | Global debt tracked by the CFL.                                                                            |
+| `getDebtForPeriod(address target, uint32 slotSize, uint32 slotIndex)`               | Debt for a given target and period.                                                                        |
+| `cashOutPayouts(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)` | Sends `amount` to the configured destination, reducing a negative debt.                                    |
+| `repayDebt(address target, uint32 slotSize, uint32 slotIndex, uint256 amount)`      | Pulls `amount` from the caller, reducing a positive debt.                                                  |
+| `yieldVault()`                                                                      | The ERC-4626 vault where idle funds are invested.                                                          |
+| `setYieldVault(IERC4626 newVault, bool force)`                                      | Deinvests and switches to a new yield vault. `force` abandons non-withdrawable old-vault assets.           |
+| `depositIntoYieldVault(uint256 amount)` / `withdrawFromYieldVault(uint256 amount)`  | Moves funds in/out of the yield vault (`type(uint256).max` = all). Reverts if a deposit mints zero shares. |
+| `cashWithdrawable()`                                                                | Liquid funds available immediately (balance + `maxWithdraw` from the yield vault).                         |
 
 The ERC-4626 asset is taken from `policyPool.currency()` and `totalAssets()` is the sum of the liquid balance, the value of the yield vault position and the outstanding debt.
 
@@ -65,6 +68,16 @@ Access control is enforced in two layers — once by the forward method and once
 
 Every allowed `(target, selector)` pair has a fake selector granted to the operator roles. Creating policies not owned by the CFL additionally requires permission on `makeFakeSelector(target, OWN_POLICY_SELECTOR)`.
 
+#### Trust model
+
+All state-changing methods are expected to be permissioned through the `AccessManagedProxy`; none of them is intended to be open to untrusted actors. LPs, partners, payout operators and the trusted forwarder are trusted roles in this design.
+
+The trusted forwarder must only be granted the `forward*` selectors at the proxy/AccessManager level. Privileged methods such as `cashOutPayouts`, configuration setters, upgrade functions and yield-vault management must be granted to EOAs or smart accounts directly, never to the trusted forwarder; otherwise every signer accepted by the forwarder would inherit those permissions.
+
+Debt is tracked globally and netted across targets and periods. LP withdrawals are capped by liquid cash, not by the signed debt, and positive debt is valued at face value: there is no on-chain write-off mechanism. Partner receivables are expected to be repaid (or settled with `repayDebt`), so LP exits can consume cash that is economically matched by another partner's receivable. Changing a target's slot size is a privileged operation that must only be done after settling that target's outstanding debt; old debt remains readable and settleable with its original `(target, slotSize, slotIndex)` tuple.
+
+See [`audits/audit_agent_report_3_findings.md`](./audits/audit_agent_report_3_findings.md) for our response to the audit findings.
+
 #### `IPolicyHolder` callbacks
 
 When policies owned by the CFL receive a payout or are cancelled, the PolicyPool calls `onPayoutReceived` / `onPolicyCancelled`, which reduce the debt of the current slot. `onPolicyExpired` and `onPolicyReplaced` are accepted without changing the debt.
@@ -73,7 +86,7 @@ When policies owned by the CFL receive a payout or are cancelled, the PolicyPool
 
 - `IPolicyHolder` — Ensuro policy-holder callbacks implemented by the CFL (`onPayoutReceived`, `onPolicyCancelled`, `onPolicyExpired`, `onPolicyReplaced`).
 - `IPolicyPool` — minimal subset of Ensuro's PolicyPool used by the CFL (`currency()`).
-- `IRiskModule` — minimal subset of Ensuro's RiskModule used to forward `newPolicy` / `newPolicies`.
+- `IRiskModule` — minimal subset of Ensuro's RiskModule used to forward `newPolicy`, `newPolicies`, `replacePolicy`, `cancelPolicy` and `resolvePolicy`.
 
 ## Prerequisites
 

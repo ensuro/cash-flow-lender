@@ -24,4 +24,28 @@ interface IRiskModule {
    * @param onBehalfOf The address that will be the owner of the created policy (same for all the policies)
    */
   function newPolicies(bytes[] calldata inputData, address onBehalfOf) external;
+
+  /**
+   * @dev Replaces a policy with a new one, with the same owner
+   *
+   * @param inputData Input data that will be decoded by the _underwriter to construct the oldPolicy and the
+   *                  parameters for the new policy.
+   */
+  function replacePolicy(bytes calldata inputData) external returns (Policy.PolicyData memory policy);
+
+  /**
+   * @dev Cancels a policy, giving back all (or part) of the pure premium and the non-accrued CoC
+   *
+   * @param inputData Input data that will be decoded by the _underwriter to construct the oldPolicy and the
+   *                  parameters for the new policy.
+   */
+  function cancelPolicy(bytes calldata inputData) external;
+
+  /**
+   * @dev Resolves a policy, if payout > 0, it pays to the policy holder.
+   *
+   * @param policy The policy previously created (from {NewPolicy} event)
+   * @param payout The payout to transfer to the policy holder
+   */
+  function resolvePolicy(Policy.PolicyData calldata policy, uint256 payout) external;
 }
