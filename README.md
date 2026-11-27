@@ -68,6 +68,16 @@ Access control is enforced in two layers — once by the forward method and once
 
 Every allowed `(target, selector)` pair has a fake selector granted to the operator roles. Creating policies not owned by the CFL additionally requires permission on `makeFakeSelector(target, OWN_POLICY_SELECTOR)`.
 
+#### Trust model
+
+All state-changing methods are expected to be permissioned through the `AccessManagedProxy`; none of them is intended to be open to untrusted actors. LPs, partners, payout operators and the trusted forwarder are trusted roles in this design.
+
+The trusted forwarder must only be granted the `forward*` selectors at the proxy/AccessManager level. Privileged methods such as `cashOutPayouts`, configuration setters, upgrade functions and yield-vault management must be granted to EOAs or smart accounts directly, never to the trusted forwarder; otherwise every signer accepted by the forwarder would inherit those permissions.
+
+Debt is tracked globally and netted across targets and periods. LP withdrawals are capped by liquid cash, not by the signed debt, and positive debt is valued at face value: there is no on-chain write-off mechanism. Partner receivables are expected to be repaid (or settled with `repayDebt`), so LP exits can consume cash that is economically matched by another partner's receivable. Changing a target's slot size is a privileged operation that must only be done after settling that target's outstanding debt; old debt remains readable and settleable with its original `(target, slotSize, slotIndex)` tuple.
+
+See [`audits/audit_agent_report_3_findings.md`](./audits/audit_agent_report_3_findings.md) for our response to the audit findings.
+
 #### `IPolicyHolder` callbacks
 
 When policies owned by the CFL receive a payout or are cancelled, the PolicyPool calls `onPayoutReceived` / `onPolicyCancelled`, which reduce the debt of the current slot. `onPolicyExpired` and `onPolicyReplaced` are accepted without changing the debt.
@@ -76,7 +86,7 @@ When policies owned by the CFL receive a payout or are cancelled, the PolicyPool
 
 - `IPolicyHolder` — Ensuro policy-holder callbacks implemented by the CFL (`onPayoutReceived`, `onPolicyCancelled`, `onPolicyExpired`, `onPolicyReplaced`).
 - `IPolicyPool` — minimal subset of Ensuro's PolicyPool used by the CFL (`currency()`).
-- `IRiskModule` — minimal subset of Ensuro's RiskModule used to forward `newPolicy` / `newPolicies`.
+- `IRiskModule` — minimal subset of Ensuro's RiskModule used to forward `newPolicy`, `newPolicies`, `replacePolicy`, `cancelPolicy` and `resolvePolicy`.
 
 ## Prerequisites
 

@@ -46,6 +46,10 @@ import {AMPUtils} from "@ensuro/access-managed-proxy/contracts/AMPUtils.sol";
  *      validations on the critical methods. It's assumed it will be deployed behind an AccessManagedProxy with
  *      the proper access control setup.
  *
+ *      The trusted forwarder must only be granted the `forward*` selectors in the AccessManager. Privileged
+ *      methods (`cashOutPayouts`, configuration setters, upgrades and yield-vault management) must never be
+ *      granted to it, otherwise every signer accepted by the forwarder would inherit those permissions.
+ *
  * @custom:security-contact security@ensuro.co
  * @author Ensuro
  */
