@@ -1887,6 +1887,70 @@ variants.forEach((variant) => {
       expect(finalDebt).to.equal(0);
     });
 
+    it("Compensates debt between periods of the same target", async () => {
+      const ret = await helpers.loadFixture(variant.fixture);
+      const { cfl, currency, lp2, rm, cflAdmin, pool, bridge23, acMgr, admin, bo } = ret;
+
+      await cfl.connect(cflAdmin).addTarget(rm, DAY, _A(1000), _A(0));
+      await vaultDeposit(cfl, lp2, _A(1000), currency);
+
+      const premium = _A(70);
+      const { callPromise: newPolicyPromise, getPolicies } = await forwardPolicies(variant, ret, [{ premium }]);
+      await expect(newPolicyPromise)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, premium, premium, premium);
+      const positiveSlotIndex = captureAny.lastUint;
+      const [newPolicy] = await getPolicies();
+
+      await helpers.time.increase(DAY * 2);
+
+      const payout = _A(100);
+      const resolveCall = rm.interface.encodeFunctionData("resolvePolicy", [newPolicy, payout]);
+      const resolveSelector = rm.interface.getFunction("resolvePolicy").selector;
+      const resolveFakeSelector = await cfl.makeFakeSelector(rm, resolveSelector);
+
+      await setupAMRole(acMgr.connect(admin), cfl, roles, "USER_OP_SIGNER", [resolveFakeSelector]);
+      await acMgr.connect(admin).grantRole(roles.USER_OP_SIGNER, bridge23, 0);
+
+      await expect(variant.callForwardMethod(ret, "forwardResolvePolicy", rm, resolveCall))
+        .to.emit(pool, "PolicyResolved")
+        .withArgs(rm, newPolicy.id, payout)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, captureAny.uint, -payout, -payout, premium - payout);
+      const negativeSlotIndex = captureAny.lastUint;
+
+      expect(negativeSlotIndex).to.not.equal(positiveSlotIndex);
+
+      // The amount can't exceed the negative debt
+      await expect(cfl.connect(bo).compensateDebt(rm, DAY, negativeSlotIndex, positiveSlotIndex, _A(120)))
+        .to.be.revertedWithCustomError(cfl, "CashOutExceedsLimit")
+        .withArgs(_A(120), -payout + _A(120));
+
+      // The amount can't exceed the positive debt
+      await expect(cfl.connect(bo).compensateDebt(rm, DAY, negativeSlotIndex, positiveSlotIndex, _A(80)))
+        .to.be.revertedWithCustomError(cfl, "RepaymentExceedsLimit")
+        .withArgs(_A(80), premium - _A(80));
+
+      const amount = _A(50);
+      const balanceBefore = await currency.balanceOf(cfl);
+      const debtBefore = await cfl.currentDebt();
+
+      await expect(cfl.connect(bo).compensateDebt(rm, DAY, negativeSlotIndex, positiveSlotIndex, amount))
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, negativeSlotIndex, amount, -payout + amount, premium - payout + amount)
+        .to.emit(cfl, "CashOutPayout")
+        .withArgs(rm, DAY, negativeSlotIndex, amount, -payout + amount, ZeroAddress)
+        .to.emit(cfl, "DebtChanged")
+        .withArgs(rm, DAY, positiveSlotIndex, -amount, premium - amount, premium - payout)
+        .to.emit(cfl, "RepayDebt")
+        .withArgs(rm, DAY, positiveSlotIndex, amount, premium - amount, ZeroAddress);
+
+      expect(await currency.balanceOf(cfl)).to.equal(balanceBefore);
+      expect(await cfl.currentDebt()).to.equal(debtBefore);
+      expect(await cfl.getDebtForPeriod(rm, DAY, negativeSlotIndex)).to.equal(-payout + amount);
+      expect(await cfl.getDebtForPeriod(rm, DAY, positiveSlotIndex)).to.equal(premium - amount);
+    });
+
     it("Configures the cash-out destination per target or default", async () => {
       const ret = await helpers.loadFixture(variant.fixture);
       const { cfl, rm, cflAdmin, lp2, bo } = ret;
